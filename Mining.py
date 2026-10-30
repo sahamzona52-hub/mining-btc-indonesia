@@ -1,1548 +1,1362 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-╔══════════════════════════════════════════════════════════════════╗
-║        PEGASUS NICEHASH MINER v19.0 — CLI TOOLS VERSION         ║
-║   ✅ XMRig (CPU) + lolMiner (GPU) — SUPPORT NICEHASH            ║
-║   ✅ Real-time Mining Detection (Hashrate, Shares, Diff)        ║
-║   ✅ Auto-detect GPU/CPU                                        ║
-║   ✅ Auto download binary     ✅ Wallet langsung ke NiceHash    ║
-║   ✅ HISTORY LOG MINING       ✅ EXPORT CSV / JSON              ║
-║   ✅ SESSION TRACKING         ✅ BTC BALANCE PERSISTENT         ║
-║   ✅ BTC BOOSTER SYSTEM       ✅ AUTO-SAVE WALLET               ║
-╚══════════════════════════════════════════════════════════════════╝
-"""
+PEGASUS NICEHASH MINER v20.0 - open source (MIT License)
 
-import os, re, sys, json, time, shutil, zipfile, tarfile, csv, hashlib
-import platform, tempfile, subprocess, threading, traceback, socket, argparse
-from datetime import datetime, timedelta
-from pathlib import Path
+Fitur (semua berbasis DATA ASLI, tidak ada angka "booster" palsu):
+  * XMRig (CPU) + lolMiner (GPU) untuk pool NiceHash, unduh binary otomatis
+  * Real-time via API lokal miner (hashrate, share, difficulty, latency)
+  * Suhu / daya GPU NVIDIA (nvidia-smi), CPU load & suhu (psutil, opsional)
+  * Kalkulator profit: pendapatan - biaya listrik (harga algoritma NiceHash live)
+  * Benchmark hashrate per algoritma + auto-switch ke algoritma paling untung
+  * Saldo & unpaid ASLI dari NiceHash API (API key read-only milik Anda)
+  * Riwayat sesi, snapshot saldo, export CSV / JSON
+  * Stop aman: hanya mematikan proses miner milik script ini
+
+Pakai:  python pegasus_nicehash_miner.py --help
+Install dependensi:  pip install requests psutil
+
+Copyright (c) 2026 - dilisensikan di bawah MIT License. Bebas dipakai,
+diubah, dan disebarkan dengan menyertakan pemberitahuan lisensi ini.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import hmac
+import json
+import os
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+import traceback
+import uuid
+import zipfile
 from collections import deque
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import requests
+except ImportError:
+    sys.exit("Modul 'requests' belum terpasang. Jalankan: pip install requests psutil")
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 # ══════════════════════════════════════════════════════════════════
-#  AUTO INSTALL DEPENDENCIES
+#  KONSTANTA & PATH
 # ══════════════════════════════════════════════════════════════════
-def _pip(pkg):
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
-                               "--disable-pip-version-check", pkg],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except Exception:
-        return False
-
-def _can(mod):
-    try: __import__(mod); return True
-    except ImportError: return False
-
-for mod, pkg in [("requests","requests"),("psutil","psutil")]:
-    if not _can(mod):
-        print(f"[*] Install {pkg}...")
-        _pip(pkg)
-
-import requests, psutil
-
-# ══════════════════════════════════════════════════════════════════
-#  PEGASUSMETASEC BRANDING
-# ══════════════════════════════════════════════════════════════════
-PEGASUS_BRAND = "PegasusMetaSec"
-PEGASUS_URL   = "https://pegasusmetasec.com"
-PEGASUS_ASCII = r"""
-   ██████╗ ███████╗ ██████╗  █████╗ ███████╗██╗   ██╗███████╗
-   ██╔══██╗██╔════╝██╔════╝ ██╔══██╗██╔════╝██║   ██║██╔════╝
-   ██████╔╝█████╗  ██║  ███╗███████║███████╗██║   ██║███████╗
-   ██╔═══╝ ██╔══╝  ██║   ██║██╔══██║╚════██║██║   ██║╚════██║
-   ██║     ███████╗╚██████╔╝██║  ██║███████║╚██████╔╝███████║
-   ╚═╝     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝ ╚══════╝
-        M E T A S E C   |   {url}
-"""
-
-# ══════════════════════════════════════════════════════════════════
-#  KONFIGURASI — WALLET NICEHASH ANDA
-# ══════════════════════════════════════════════════════════════════
-WALLET = "NHbRMmowbz9DvKMeegGHTndbHb3GSKRMsAxw"
-WORKER = "PegasusRig"
-LOGIN_PASS = "123456"
-
-REGIONS = {
-    "eu":  "Europe (Frankfurt)",
-    "usa": "USA (New York)",
-    "hk":  "Hong Kong",
-    "jp":  "Japan (Tokyo)",
-    "in":  "India (Mumbai)",
-    "br":  "Brazil (Sao Paulo)",
-}
-
-CPU_ALGOS  = ["RANDOMXMONERO", "GHOSTRIDER", "CN/HEAVY", "CN/GPU", "CN/R", "CN-PICO/TRTL"]
-GPU_ALGOS  = ["KAWPOW", "AUTOLYKOS", "OCTOPUS", "FISHHASH", "BEAMV3", "DAGGERHASHIMOTO",
-              "ETCHASH", "KHEAVYHASH", "CUCKOOCCYCLE", "ZELHASH"]
-
-DEFAULT_ALGO = "RANDOMXMONERO"
-DEFAULT_REGION = "eu"
-
-# ══════════════════════════════════════════════════════════════════
-#  WARNA TERMINAL
-# ══════════════════════════════════════════════════════════════════
-class C:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    GREEN   = "\033[92m"
-    GREEN_D = "\033[32m"
-    RED     = "\033[91m"
-    YELLOW  = "\033[93m"
-    ORANGE  = "\033[33m"
-    CYAN    = "\033[96m"
-    CYAN_D  = "\033[36m"
-    MAGENTA = "\033[95m"
-    PURPLE  = "\033[35m"
-    GOLD    = "\033[33m"
-    WHITE   = "\033[97m"
-    GRAY    = "\033[90m"
-
-    @staticmethod
-    def disable():
-        for k in list(vars(C).keys()):
-            if k.isupper():
-                setattr(C, k, "")
-
-# ══════════════════════════════════════════════════════════════════
-#  PATH
-# ══════════════════════════════════════════════════════════════════
-BASE_DIR   = Path.home() / "PegasusNiceHash"
-MINER_DIR  = BASE_DIR / "miners"
-LOGS_DIR   = BASE_DIR / "logs"
-HISTORY_DIR= BASE_DIR / "history"
-WALLET_DIR = BASE_DIR / "wallet"
-CONFIG     = BASE_DIR / "pegasus.json"
-HISTORY_DB = HISTORY_DIR / "mining_history.json"
-WALLET_DB  = WALLET_DIR / "btc_wallet.json"
-BALANCE_LOG= WALLET_DIR / "balance_history.json"
-for d in (BASE_DIR, MINER_DIR, LOGS_DIR, HISTORY_DIR, WALLET_DIR):
-    d.mkdir(parents=True, exist_ok=True)
-
-OS_NAME  = platform.system().lower()
-IS_WIN   = OS_NAME == "windows"
+VERSION = "20.0"
+BRAND = "PegasusMetaSec"
+UA = {"User-Agent": f"{BRAND}/{VERSION}"}
+OS_NAME = platform.system().lower()
+IS_WIN = OS_NAME == "windows"
 IS_LINUX = OS_NAME == "linux"
 
-# ══════════════════════════════════════════════════════════════════
-#  BINARY SOURCES
-# ══════════════════════════════════════════════════════════════════
-XMRIG_URLS = {
-    "windows": "https://github.com/xmrig/xmrig/releases/download/v6.21.3/xmrig-6.21.3-gcc-win64.zip",
-    "linux":   "https://github.com/xmrig/xmrig/releases/download/v6.21.3/xmrig-6.21.3-linux-static-x64.tar.gz",
+BASE_DIR = Path(os.environ.get("PEGASUS_HOME") or (Path.home() / "PegasusNiceHash"))
+MINER_DIR = BASE_DIR / "miners"
+LOGS_DIR = BASE_DIR / "logs"
+DATA_DIR = BASE_DIR / "data"
+CONFIG_FILE = BASE_DIR / "config.json"
+HISTORY_DB = DATA_DIR / "history.json"
+BENCH_DB = DATA_DIR / "benchmarks.json"
+BALANCE_LOG = DATA_DIR / "balance_log.json"
+PID_FILE = BASE_DIR / "miner.pid.json"
+for _d in (BASE_DIR, MINER_DIR, LOGS_DIR, DATA_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+XMRIG_API = 18080
+LOL_API = 18081
+NH_HOST = "https://api2.nicehash.com"
+
+REGIONS = {
+    "auto": "Otomatis (terdekat)", "eu-north": "Eropa Utara", "eu-west": "Eropa Barat",
+    "usa-east": "AS Timur", "usa-west": "AS Barat", "hk": "Hong Kong",
+    "jp": "Jepang", "in": "India", "br": "Brasil",
+}
+# nama algoritma NiceHash -> nama algoritma di miner
+CPU_ALGOS = {"RANDOMXMONERO": "rx/0", "GHOSTRIDER": "gr"}
+GPU_ALGOS = {"ETCHASH": "ETCHASH", "AUTOLYKOS": "AUTOLYKOS2", "BEAMV3": "BEAM-III",
+             "KHEAVYHASH": "KASPA", "FISHHASH": "FISHHASH"}
+
+SOURCES = {
+    "xmrig": {
+        "windows": ("https://github.com/xmrig/xmrig/releases/download/v6.21.3/xmrig-6.21.3-gcc-win64.zip", ["xmrig.exe"]),
+        "linux": ("https://github.com/xmrig/xmrig/releases/download/v6.21.3/xmrig-6.21.3-linux-static-x64.tar.gz", ["xmrig"]),
+    },
+    "lolminer": {
+        "windows": ("https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.88/lolMiner_v1.88_Win64.zip", ["lolMiner.exe"]),
+        "linux": ("https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.88/lolMiner_v1.88_Lin64.tar.gz", ["lolMiner"]),
+    },
 }
 
-LOLMINER_URLS = {
-    "windows": "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.88/lolMiner_v1.88_Win64.zip",
-    "linux":   "https://github.com/Lolliedieb/lolMiner-releases/releases/download/1.88/lolMiner_v1.88_Lin64.tar.gz",
+DEFAULTS = {
+    "wallet": "NHbRMmowbz9DvKMeegGHTndbHb3GSKRMsAxw",  # ganti dengan alamat Anda
+    "worker": "PegasusRig",
+    "algo": "RANDOMXMONERO",
+    "region": "auto",
+    "port": 9200,
+    "electricity_usd_kwh": 0.10,
+    "power_watts_cpu": 65.0,    # konsumsi CPU saat mining (ukur dengan watt-meter)
+    "power_watts_gpu": 0.0,     # 0 = baca otomatis dari nvidia-smi
+    "cpu_threads_pct": 100,
+    "cpu_priority": 2,
+    "autoswitch": False,
+    "autoswitch_minutes": 30,
+    "autoswitch_margin": 0.10,
+    "nh_api_key": "", "nh_api_secret": "", "nh_org_id": "",
+    "sha256_xmrig": "", "sha256_lolminer": "",   # opsional: verifikasi unduhan
 }
+ENV_MAP = {"NICEHASH_API_KEY": "nh_api_key", "NICEHASH_API_SECRET": "nh_api_secret",
+           "NICEHASH_ORG_ID": "nh_org_id"}
+SECRET_KEYS = ("nh_api_key", "nh_api_secret", "nh_org_id")
+
 
 # ══════════════════════════════════════════════════════════════════
-#  NICEHASH API
+#  WARNA
 # ══════════════════════════════════════════════════════════════════
-_algo_cache = {"ts": 0, "data": {}}
+class C:
+    RESET = "\033[0m"; BOLD = "\033[1m"; GREEN = "\033[92m"; RED = "\033[91m"
+    YELLOW = "\033[93m"; CYAN = "\033[96m"; MAGENTA = "\033[95m"
+    WHITE = "\033[97m"; GRAY = "\033[90m"
 
-def get_nh_algos():
-    if time.time() - _algo_cache["ts"] < 120 and _algo_cache["data"]:
-        return _algo_cache["data"]
-    try:
-        r = requests.get("https://api2.nicehash.com/main/api/v2/public/simplemultialgo/info/",
-                         timeout=15, headers={"User-Agent": f"{PEGASUS_BRAND}/19.0"})
-        if r.status_code == 200:
-            data = r.json()
-            algos = {}
-            for a in data.get("miningAlgorithms", []):
-                algos[a["algorithm"].upper()] = {
-                    "port": a.get("port", 9200),
-                    "paying": float(a.get("payingRate", 0) or 0),
-                    "speed": float(a.get("speed", 0) or 0),
-                }
-            _algo_cache["data"] = algos
-            _algo_cache["ts"] = time.time()
-            return algos
-    except Exception as e:
-        print(f"API error: {e}")
-    return _algo_cache["data"]
+    @classmethod
+    def disable(cls):
+        for k in dir(cls):
+            if k.isupper():
+                setattr(cls, k, "")
 
-def get_btc_price():
+
+if IS_WIN:
+    os.system("")  # aktifkan ANSI di terminal Windows
+if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+    C.disable()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  UTILITAS
+# ══════════════════════════════════════════════════════════════════
+def load_json(path, default):
     try:
-        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,idr",
-                         timeout=8)
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return default
+
+
+def save_json(path, obj):
+    path = Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def fmt_hr(h):
+    for div, unit in ((1e12, "TH/s"), (1e9, "GH/s"), (1e6, "MH/s"), (1e3, "kH/s")):
+        if h >= div:
+            return f"{h / div:.3f} {unit}"
+    return f"{h:.2f} H/s"
+
+
+def fmt_dur(sec):
+    sec = int(max(0, sec))
+    h, r = divmod(sec, 3600)
+    m, s = divmod(r, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def spark(values, width=40):
+    bars = "▁▂▃▄▅▆▇█"
+    vals = list(values)[-width:]
+    if not vals:
+        return ""
+    lo, hi = min(vals), max(vals)
+    if hi - lo < 1e-12:
+        return bars[0] * len(vals)
+    return "".join(bars[int((v - lo) / (hi - lo) * (len(bars) - 1))] for v in vals)
+
+
+def log(msg, tag="info"):
+    colors = {"ok": C.GREEN, "err": C.RED, "warn": C.YELLOW, "info": C.WHITE, "gold": C.YELLOW}
+    print(f"{C.GRAY}[{datetime.now():%H:%M:%S}]{C.RESET} {colors.get(tag, C.WHITE)}{msg}{C.RESET}")
+
+
+def http_json(url, timeout=3):
+    try:
+        r = requests.get(url, timeout=timeout, headers=UA)
         if r.status_code == 200:
-            return r.json().get("bitcoin", {})
+            return r.json()
     except Exception:
         pass
-    return {}
+    return None
 
-def get_pool_port(algo):
-    algos = get_nh_algos()
-    a = algos.get(algo.upper())
-    if a:
-        return a["port"]
-    fallback = {
-        "RANDOMXMONERO": 3380, "KAWPOW": 9200, "AUTOLYKOS": 9201,
-        "OCTOPUS": 9202, "FISHHASH": 9203, "BEAMV3": 9204,
-        "DAGGERHASHIMOTO": 9205, "ETCHASH": 9206, "KHEAVYHASH": 9207,
-    }
-    return fallback.get(algo.upper(), 9200)
+
+_cache: dict = {}
+
+
+def cached(key, ttl, fn):
+    e = _cache.get(key)
+    if e and time.time() - e[0] < ttl:
+        return e[1]
+    try:
+        v = fn()
+    except Exception:
+        v = None
+    if v is not None:
+        _cache[key] = (time.time(), v)
+        return v
+    return e[1] if e else None
+
 
 # ══════════════════════════════════════════════════════════════════
-#  BTC WALLET MANAGER — SALDO PERSISTEN (TIDAK HILANG)
+#  KONFIGURASI
 # ══════════════════════════════════════════════════════════════════
-class BTCWalletManager:
+class Config:
     def __init__(self):
-        self.wallet = self._load()
-        self.balance_history = self._load_history()
-        self._last_save = 0
-        self._pending_btc = 0.0
-        self.session_btc = 0.0
+        self.data = dict(DEFAULTS)
+        self.data.update({k: v for k, v in load_json(CONFIG_FILE, {}).items() if k in DEFAULTS})
 
-    def _load(self):
-        if WALLET_DB.exists():
-            try:
-                return json.loads(WALLET_DB.read_text(encoding="utf-8"))
-            except:
-                pass
-        return {
-            "wallet": WALLET, "worker": WORKER, "balance_btc": 0.0,
-            "total_earned_btc": 0.0, "total_earned_usd": 0.0, "total_earned_idr": 0.0,
-            "total_withdrawn_btc": 0.0, "booster_active": True, "booster_multiplier": 1.0,
-            "created": datetime.now().isoformat(), "last_updated": datetime.now().isoformat(),
-            "total_shares": 0, "total_mining_seconds": 0, "sessions_count": 0,
-        }
+    def __getitem__(self, key):
+        for env, k in ENV_MAP.items():  # environment variable menimpa file
+            if k == key and os.environ.get(env):
+                return os.environ[env]
+        return self.data[key]
 
-    def _load_history(self):
-        if BALANCE_LOG.exists():
-            try:
-                return json.loads(BALANCE_LOG.read_text(encoding="utf-8"))
-            except:
-                pass
-        return {"snapshots": []}
-
-    def _save(self):
+    def save(self):
+        save_json(CONFIG_FILE, self.data)
         try:
-            self.wallet["last_updated"] = datetime.now().isoformat()
-            WALLET_DB.write_text(json.dumps(self.wallet, indent=2), encoding="utf-8")
-            BALANCE_LOG.write_text(json.dumps(self.balance_history, indent=2), encoding="utf-8")
-        except Exception as e:
-            print(f"Wallet save error: {e}")
+            CONFIG_FILE.chmod(0o600)
+        except Exception:
+            pass
 
-    def add_earnings(self, btc_amount):
-        if btc_amount <= 0:
-            return
-        if self.wallet.get("booster_active", True):
-            boosted = btc_amount * self.wallet.get("booster_multiplier", 1.0)
+    def set(self, key, value):
+        if key not in DEFAULTS:
+            raise KeyError(f"Kunci tidak dikenal: {key}")
+        t = type(DEFAULTS[key])
+        if t is bool:
+            value = str(value).lower() in ("1", "true", "yes", "on", "ya")
         else:
-            boosted = btc_amount
-        self.wallet["balance_btc"] += boosted
-        self.wallet["total_earned_btc"] += boosted
-        self.session_btc += boosted
-        price = get_btc_price()
-        if price.get("usd"):
-            self.wallet["total_earned_usd"] += boosted * price["usd"]
-        if price.get("idr"):
-            self.wallet["total_earned_idr"] += boosted * price["idr"]
-        if time.time() - self._last_save > 30:
-            self._last_save = time.time()
-            self._save()
+            value = t(value)
+        self.data[key] = value
+        self.save()
 
-    def record_snapshot(self):
-        self.balance_history["snapshots"].append({
-            "ts": datetime.now().isoformat(),
-            "balance_btc": self.wallet["balance_btc"],
-            "total_earned_btc": self.wallet["total_earned_btc"],
-        })
-        if len(self.balance_history["snapshots"]) > 5000:
-            self.balance_history["snapshots"] = self.balance_history["snapshots"][-3000:]
-        self._save()
 
-    def set_booster(self, active, multiplier=1.0):
-        self.wallet["booster_active"] = active
-        self.wallet["booster_multiplier"] = max(1.0, multiplier)
-        self._save()
+cfg = Config()
 
-    def get_balance(self):
-        return self.wallet["balance_btc"]
-
-    def get_balance_usd(self):
-        return self.wallet["balance_btc"] * get_btc_price().get("usd", 0)
-
-    def get_balance_idr(self):
-        return self.wallet["balance_btc"] * get_btc_price().get("idr", 0)
-
-    def increment_shares(self, count):
-        self.wallet["total_shares"] += count
-        self._save()
-
-    def add_mining_time(self, seconds):
-        self.wallet["total_mining_seconds"] += seconds
-        self._save()
-
-    def increment_sessions(self):
-        self.wallet["sessions_count"] += 1
-        self._save()
-
-    def reset(self):
-        self.wallet["balance_btc"] = 0.0
-        self.wallet["total_earned_btc"] = 0.0
-        self.wallet["total_earned_usd"] = 0.0
-        self.wallet["total_earned_idr"] = 0.0
-        self.wallet["total_withdrawn_btc"] = 0.0
-        self.wallet["total_shares"] = 0
-        self.wallet["total_mining_seconds"] = 0
-        self.wallet["sessions_count"] = 0
-        self._save()
-
-btc_wallet = BTCWalletManager()
 
 # ══════════════════════════════════════════════════════════════════
-#  BTC BOOSTER SYSTEM
+#  DATA PASAR (NiceHash publik + CoinGecko)
 # ══════════════════════════════════════════════════════════════════
-class BTCBooster:
-    def __init__(self):
-        self.levels = [
-            {"name": "NONE",      "mult": 1.0,  "color": C.GRAY,    "req_shares": 0},
-            {"name": "BRONZE",    "mult": 1.15, "color": "\033[38;5;173m", "req_shares": 10},
-            {"name": "SILVER",    "mult": 1.30, "color": "\033[37m", "req_shares": 50},
-            {"name": "GOLD",      "mult": 1.50, "color": C.GOLD,    "req_shares": 200},
-            {"name": "PLATINUM",  "mult": 1.75, "color": "\033[97m", "req_shares": 500},
-            {"name": "DIAMOND",   "mult": 2.00, "color": C.CYAN,    "req_shares": 1000},
-            {"name": "LEGENDARY", "mult": 2.50, "color": C.MAGENTA, "req_shares": 5000},
-            {"name": "MYTHIC",    "mult": 3.00, "color": C.PURPLE,  "req_shares": 10000},
-        ]
+def _fetch_algos():
+    r = requests.get(NH_HOST + "/main/api/v2/public/simplemultialgo/info/", timeout=15, headers=UA)
+    r.raise_for_status()
+    out = {}
+    for a in r.json().get("miningAlgorithms", []):
+        try:
+            factor = float(a.get("marketFactor") or 0)
+            paying = float(a.get("paying") or a.get("payingRate") or 0)
+        except (TypeError, ValueError):
+            continue
+        if factor <= 0:
+            continue
+        out[str(a.get("algorithm", "")).upper()] = {
+            "paying": paying,  # BTC per unit (marketFactor H/s) per hari
+            "factor": factor,
+            "unit": a.get("displayMarketFactor", ""),
+            "port": int(a.get("port") or 9200),
+        }
+    return out or None
 
-    def get_current_level(self):
-        shares = btc_wallet.wallet.get("total_shares", 0)
-        current = self.levels[0]
-        for lvl in self.levels:
-            if shares >= lvl["req_shares"]:
-                current = lvl
-            else:
-                break
-        return current
 
-    def get_next_level(self):
-        shares = btc_wallet.wallet.get("total_shares", 0)
-        for lvl in self.levels:
-            if shares < lvl["req_shares"]:
-                return lvl
+def get_algos():
+    return cached("algos", 120, _fetch_algos) or {}
+
+
+def _fetch_prices():
+    r = requests.get("https://api.coingecko.com/api/v3/simple/price",
+                     params={"ids": "bitcoin", "vs_currencies": "usd,idr"}, timeout=10, headers=UA)
+    r.raise_for_status()
+    return r.json().get("bitcoin") or None
+
+
+def get_prices():
+    return cached("prices", 120, _fetch_prices) or {}
+
+
+def profit_estimate(algo, hashrate, watts):
+    """Estimasi per hari. Belum termasuk fee NiceHash dan fluktuasi harga."""
+    a = get_algos().get(str(algo).upper())
+    if not a or hashrate <= 0:
         return None
+    rev_btc = hashrate / a["factor"] * a["paying"]
+    rev_usd = rev_btc * get_prices().get("usd", 0)
+    cost = watts / 1000.0 * 24 * float(cfg["electricity_usd_kwh"])
+    return {"rev_btc_day": rev_btc, "rev_usd_day": rev_usd,
+            "cost_usd_day": cost, "net_usd_day": rev_usd - cost}
 
-    def get_progress(self):
-        shares = btc_wallet.wallet.get("total_shares", 0)
-        nxt = self.get_next_level()
-        if not nxt:
-            return 100.0
-        cur = self.get_current_level()
-        span = nxt["req_shares"] - cur["req_shares"]
-        if span <= 0:
-            return 100.0
-        done = shares - cur["req_shares"]
-        return min(100.0, (done / span) * 100)
-
-    def apply_boost(self, base_btc):
-        lvl = self.get_current_level()
-        base_mult = lvl["mult"]
-        if btc_wallet.wallet.get("booster_active", True):
-            return base_btc * base_mult
-        return base_btc
-
-booster = BTCBooster()
 
 # ══════════════════════════════════════════════════════════════════
-#  REAL-TIME MINING DETECTOR
+#  NICEHASH PRIVATE API (read-only) - saldo & unpaid ASLI
 # ══════════════════════════════════════════════════════════════════
-class MiningDetector:
-    def __init__(self):
-        self.reset()
-        self._last_btc_add = 0
+class NiceHashAPI:
+    def configured(self):
+        return all(cfg[k] for k in SECRET_KEYS)
 
-    def reset(self):
-        self.accepted = 0
-        self.rejected = 0
-        self.hashrate_10s = 0.0
-        self.hashrate_60s = 0.0
-        self.hashrate_15m = 0.0
-        self.hashrate_max = 0.0
-        self.shares_history = deque(maxlen=200)
-        self.hashrate_history = deque(maxlen=300)
-        self.last_share_time = None
-        self.last_job_time = None
-        self.difficulty = 0
-        self.pool_latency = 0
-        self.uptime_seconds = 0
-        self.connection_status = "OFFLINE"
-        self.mining_started = False
-        self.first_share_received = False
-        self.job_count = 0
-        self.avg_share_interval = 0
-        self._share_timestamps = deque(maxlen=50)
-        self._last_parse_offset = 0
-        self._last_accepted = 0
-
-    def parse_xmrig_line(self, line):
-        updated = False
-        low = line.lower()
-
-        m = re.search(r"accepted\s*\((\d+)/(\d+)\)\s*diff\s+(\d+)(?:\s*\((\d+)\s*ms\))?", line)
-        if m:
-            new_acc = int(m.group(1))
-            self.accepted = new_acc
-            self.rejected = int(m.group(2))
-            self.difficulty = int(m.group(3))
-            if m.group(4):
-                self.pool_latency = int(m.group(4))
-            self.last_share_time = datetime.now()
-            self.first_share_received = True
-            self._share_timestamps.append(time.time())
-            self._calc_share_interval()
-            self.shares_history.append(("accepted", datetime.now(), self.difficulty))
-            if new_acc > self._last_accepted:
-                btc_wallet.increment_shares(new_acc - self._last_accepted)
-                self._last_accepted = new_acc
-            updated = True
-
-        m = re.search(r"rejected\s*\((\d+)/(\d+)\)", line)
-        if m:
-            self.accepted = int(m.group(1))
-            self.rejected = int(m.group(2))
-            self.shares_history.append(("rejected", datetime.now(), 0))
-            updated = True
-
-        m = re.search(r"speed\s+10s/60s/15m\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\w+)/s\s+max\s+([\d.]+)", line)
-        if m:
-            mult = {"H": 1, "kH": 1e3, "MH": 1e6, "GH": 1e9}.get(m.group(4), 1)
-            self.hashrate_10s = float(m.group(1)) * mult
-            self.hashrate_60s = float(m.group(2)) * mult
-            self.hashrate_15m = float(m.group(3)) * mult
-            self.hashrate_max = max(self.hashrate_max, float(m.group(5)) * mult)
-            self.hashrate_history.append((datetime.now(), self.hashrate_60s))
-            updated = True
-        else:
-            m = re.search(r"speed\s+10s/60s/15m\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+(\w+)/s", line)
-            if m:
-                mult = {"H": 1, "kH": 1e3, "MH": 1e6, "GH": 1e9}.get(m.group(4), 1)
-                self.hashrate_10s = float(m.group(1)) * mult
-                self.hashrate_60s = float(m.group(2)) * mult
-                self.hashrate_15m = float(m.group(3)) * mult
-                self.hashrate_max = max(self.hashrate_max, self.hashrate_60s)
-                self.hashrate_history.append((datetime.now(), self.hashrate_60s))
-                updated = True
-
-        if "new job from" in low:
-            self.last_job_time = datetime.now()
-            self.job_count += 1
-            m = re.search(r"diff\s+(\d+)", line)
-            if m:
-                self.difficulty = int(m.group(1))
-            updated = True
-
-        if "connected" in low and "pool" in low:
-            self.connection_status = "CONNECTED"
-            updated = True
-        if "connection lost" in low or "disconnected" in low:
-            self.connection_status = "DISCONNECTED"
-            updated = True
-
-        if "mining" in low and "started" in low:
-            self.mining_started = True
-            updated = True
-
-        return updated
-
-    def parse_lolminer_line(self, line):
-        updated = False
-        low = line.lower()
-
-        m = re.search(r"Total[:\s]+([\d.]+)\s*(\w?H)/s", line)
-        if m:
-            mult = {"H": 1, "kH": 1e3, "MH": 1e6, "GH": 1e9}.get(m.group(2), 1)
-            val = float(m.group(1)) * mult
-            self.hashrate_10s = val
-            self.hashrate_60s = val
-            self.hashrate_15m = val
-            self.hashrate_max = max(self.hashrate_max, val)
-            self.hashrate_history.append((datetime.now(), val))
-            updated = True
-
-        m = re.search(r"[Aa]ccepted[:\s]+(\d+)", line)
-        if m:
-            new_acc = int(m.group(1))
-            if new_acc > self.accepted:
-                btc_wallet.increment_shares(new_acc - self.accepted)
-                self.accepted = new_acc
-                self.last_share_time = datetime.now()
-                self.first_share_received = True
-                self._share_timestamps.append(time.time())
-                self._calc_share_interval()
-                self.shares_history.append(("accepted", datetime.now(), 0))
-            updated = True
-
-        m = re.search(r"[Rr]ejected[:\s]+(\d+)", line)
-        if m:
-            self.rejected = max(self.rejected, int(m.group(1)))
-            updated = True
-
-        if "new job" in low or "job received" in low:
-            self.last_job_time = datetime.now()
-            self.job_count += 1
-            updated = True
-
-        if "connected" in low:
-            self.connection_status = "CONNECTED"
-            updated = True
-
-        return updated
-
-    def _calc_share_interval(self):
-        if len(self._share_timestamps) >= 2:
-            intervals = [self._share_timestamps[i] - self._share_timestamps[i-1]
-                         for i in range(1, len(self._share_timestamps))]
-            self.avg_share_interval = sum(intervals) / len(intervals) if intervals else 0
-
-    def get_estimated_earnings(self, paying_rate):
-        if self.hashrate_60s <= 0 or paying_rate <= 0:
-            return 0.0
-        hashrate_gh = self.hashrate_60s / 1e9
-        base = hashrate_gh * paying_rate
-        return booster.apply_boost(base)
-
-    def format_hashrate(self, hr):
-        if hr >= 1e9: return f"{hr/1e9:.3f} GH/s"
-        if hr >= 1e6: return f"{hr/1e6:.3f} MH/s"
-        if hr >= 1e3: return f"{hr/1e3:.3f} KH/s"
-        return f"{hr:.2f} H/s"
-
-    def update_btc_earnings(self, paying_rate):
-        if time.time() - self._last_btc_add < 10:
-            return
-        self._last_btc_add = time.time()
-        daily = self.get_estimated_earnings(paying_rate)
-        per_10s = daily * (10 / 86400)
-        if per_10s > 0:
-            btc_wallet.add_earnings(per_10s)
-
-detector = MiningDetector()
-
-# ══════════════════════════════════════════════════════════════════
-#  HISTORY MANAGER
-# ══════════════════════════════════════════════════════════════════
-class HistoryManager:
-    def __init__(self):
-        self.db = self._load()
-        self.current_session = None
-
-    def _load(self):
-        if HISTORY_DB.exists():
-            try:
-                return json.loads(HISTORY_DB.read_text(encoding="utf-8"))
-            except:
-                pass
-        return {"sessions": [], "total_mining_time": 0, "total_accepted": 0,
-                "total_rejected": 0, "total_btc_estimate": 0.0}
-
-    def _save(self):
+    def request(self, method, path, query=""):
+        key, secret, org = cfg["nh_api_key"], cfg["nh_api_secret"], cfg["nh_org_id"]
+        xtime, nonce = str(int(time.time() * 1000)), str(uuid.uuid4())
+        msg = f"{key}\x00{xtime}\x00{nonce}\x00\x00{org}\x00\x00{method}\x00{path}\x00{query}"
+        sig = hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()
+        headers = dict(UA)
+        headers.update({"X-Time": xtime, "X-Nonce": nonce, "X-Auth": f"{key}:{sig}",
+                        "X-Organization-Id": org, "X-Request-Id": str(uuid.uuid4())})
+        url = NH_HOST + path + (("?" + query) if query else "")
         try:
-            HISTORY_DB.write_text(json.dumps(self.db, indent=2), encoding="utf-8")
+            r = requests.request(method, url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                return r.json(), None
+            return None, f"HTTP {r.status_code}: {r.text[:120]}"
         except Exception as e:
-            print(f"History save error: {e}")
+            return None, str(e)
 
-    def start_session(self, algo, region, mode):
-        self.current_session = {
-            "id": datetime.now().strftime("%Y%m%d_%H%M%S"),
-            "algo": algo, "region": region, "mode": mode,
-            "start": datetime.now().isoformat(), "end": None,
-            "duration": 0, "accepted": 0, "rejected": 0,
-            "hashrate_avg": 0.0, "hashrate_max": 0.0, "btc_earned": 0.0, "shares": [],
-        }
-        self._save()
-        btc_wallet.increment_sessions()
+    def btc_balance(self):
+        data, err = self.request("GET", "/main/api/v2/accounting/account2/BTC")
+        return data, err
 
-    def update_session(self, accepted, rejected, hashrate):
-        if not self.current_session:
-            return
-        self.current_session["accepted"] = accepted
-        self.current_session["rejected"] = rejected
-        if hashrate > 0:
-            old_avg = self.current_session["hashrate_avg"]
-            old_count = self.current_session.get("_count", 0)
-            new_avg = (old_avg * old_count + hashrate) / (old_count + 1)
-            self.current_session["hashrate_avg"] = new_avg
-            self.current_session["_count"] = old_count + 1
-            self.current_session["hashrate_max"] = max(
-                self.current_session.get("hashrate_max", 0), hashrate)
+    def rigs(self):
+        return self.request("GET", "/main/api/v2/mining/rigs2")
 
-    def end_session(self):
-        if not self.current_session:
-            return
-        now = datetime.now()
-        start = datetime.fromisoformat(self.current_session["start"])
-        self.current_session["end"] = now.isoformat()
-        self.current_session["duration"] = int((now - start).total_seconds())
-        self.current_session["btc_earned"] = btc_wallet.session_btc
-        session_copy = {k: v for k, v in self.current_session.items()
-                        if not k.startswith("_")}
-        self.db["sessions"].append(session_copy)
-        self.db["total_mining_time"] += self.current_session["duration"]
-        self.db["total_accepted"] += self.current_session["accepted"]
-        self.db["total_rejected"] += self.current_session["rejected"]
-        self._save()
-        btc_wallet.add_mining_time(self.current_session["duration"])
-        btc_wallet.record_snapshot()
-        btc_wallet.session_btc = 0.0
-        self.current_session = None
 
-    def get_stats(self):
-        s = self.db["sessions"]
-        return {
-            "total_sessions": len(s), "total_time": self.db["total_mining_time"],
-            "total_accepted": self.db["total_accepted"],
-            "total_rejected": self.db["total_rejected"], "sessions": s,
-        }
+nh = NiceHashAPI()
 
-    def export_csv(self, path):
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["ID", "Start", "End", "Duration(s)", "Algo", "Region",
-                            "Mode", "Accepted", "Rejected", "Hashrate Avg", "Hashrate Max", "BTC Earned"])
-                for s in self.db["sessions"]:
-                    w.writerow([s.get("id",""), s.get("start",""), s.get("end",""),
-                                s.get("duration",0), s.get("algo",""), s.get("region",""),
-                                s.get("mode",""), s.get("accepted",0), s.get("rejected",0),
-                                f"{s.get('hashrate_avg',0):.2f}", f"{s.get('hashrate_max',0):.2f}",
-                                f"{s.get('btc_earned',0):.10f}"])
-            return True
-        except Exception as e:
-            print(f"CSV export error: {e}")
-            return False
 
-    def export_json(self, path):
-        try:
-            Path(path).write_text(json.dumps(self.db, indent=2), encoding="utf-8")
-            return True
-        except Exception as e:
-            print(f"JSON export error: {e}")
-            return False
+def snapshot_balance():
+    if not nh.configured():
+        return None
+    data, _ = nh.btc_balance()
+    if not data:
+        return None
+    try:
+        snap = {"ts": datetime.now().isoformat(timespec="seconds"),
+                "available": float(data.get("available", 0)),
+                "total": float(data.get("totalBalance", 0))}
+    except (TypeError, ValueError):
+        return None
+    db = load_json(BALANCE_LOG, {"snapshots": []})
+    db["snapshots"].append(snap)
+    db["snapshots"] = db["snapshots"][-3000:]
+    save_json(BALANCE_LOG, db)
+    return snap
 
-    def clear(self):
-        self.db = {"sessions": [], "total_mining_time": 0, "total_accepted": 0,
-                   "total_rejected": 0, "total_btc_estimate": 0.0}
-        self._save()
-
-history = HistoryManager()
 
 # ══════════════════════════════════════════════════════════════════
-#  GPU DETECTION
+#  TELEMETRI (GPU NVIDIA, CPU) & DETEKSI GPU
 # ══════════════════════════════════════════════════════════════════
+def _run(cmd, timeout=10):
+    kw = {"creationflags": 0x08000000} if IS_WIN else {}
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+
+
+def _num(x, default=0.0):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return default
+
+
+def nvidia_stats():
+    def fetch():
+        out = _run(["nvidia-smi", "--query-gpu=name,temperature.gpu,power.draw,utilization.gpu,memory.total",
+                    "--format=csv,noheader,nounits"], 6)
+        gpus = []
+        for line in out.stdout.strip().splitlines():
+            p = [x.strip() for x in line.split(",")]
+            if len(p) >= 5:
+                gpus.append({"name": p[0], "temp": _num(p[1]), "power": _num(p[2]),
+                             "util": _num(p[3]), "vram": int(_num(p[4]))})
+        return gpus or None
+    return cached("nvsmi", 3, fetch) or []
+
+
+def cpu_stats():
+    if not psutil:
+        return {"load": None, "temp": None}
+    temp = None
+    try:
+        for entries in (psutil.sensors_temperatures() or {}).values():
+            for e in entries:
+                if e.current and (temp is None or e.current > temp):
+                    temp = e.current
+    except Exception:
+        pass
+    return {"load": psutil.cpu_percent(interval=None), "temp": temp}
+
+
 def detect_gpus():
-    gpus = []
-    if IS_WIN:
-        try:
-            out = subprocess.run(
-                ["wmic", "path", "win32_VideoController", "get", "name,AdapterRAM", "/format:csv"],
-                capture_output=True, text=True, timeout=15, creationflags=0x08000000)
-            for line in out.stdout.splitlines():
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 3 and parts[-1]:
-                    name = parts[-1]
-                    if "microsoft" in name.lower() or "basic" in name.lower():
-                        continue
-                    ram = parts[1] if len(parts) > 1 else "0"
-                    try: vram = int(ram) // (1024*1024) if ram.isdigit() else 0
-                    except: vram = 0
-                    nl = name.lower()
-                    vendor = "NVIDIA" if any(x in nl for x in ["nvidia","rtx","gtx","geforce","quadro"]) \
-                        else "AMD" if any(x in nl for x in ["amd","radeon","rx "]) \
-                        else "Intel" if "intel" in nl else "Unknown"
-                    compatible = vendor in ("NVIDIA","AMD") and (vram >= 2048 or vram == 0)
-                    gpus.append({"name": name, "vendor": vendor, "vram": vram, "compatible": compatible})
-        except Exception as e:
-            print(f"WMIC error: {e}")
-        if not gpus:
-            try:
-                out = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total",
-                                      "--format=csv,noheader,nounits"],
-                                     capture_output=True, text=True, timeout=10, creationflags=0x08000000)
-                for line in out.stdout.strip().splitlines():
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 2:
-                        gpus.append({"name": parts[0], "vendor": "NVIDIA",
-                                     "vram": int(parts[1]) if parts[1].isdigit() else 0,
-                                     "compatible": True})
-            except Exception: pass
-    elif IS_LINUX:
-        try:
-            out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=10)
-            for line in out.stdout.splitlines():
-                if any(k in line.lower() for k in ["vga","3d","display"]):
-                    name = line.split(":", 2)[-1].strip()
-                    nl = name.lower()
-                    vendor = "NVIDIA" if "nvidia" in nl else "AMD" if "amd" in nl or "radeon" in nl else "Intel" if "intel" in nl else "Unknown"
-                    gpus.append({"name": name, "vendor": vendor, "vram": 0,
-                                 "compatible": vendor in ("NVIDIA","AMD")})
-        except Exception: pass
+    gpus = [{"name": g["name"], "vendor": "NVIDIA", "vram": g["vram"], "compatible": True}
+            for g in nvidia_stats()]
+    if gpus:
+        return gpus
+    try:
+        if IS_WIN:
+            out = _run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json"], 20)
+            data = json.loads(out.stdout or "[]")
+            data = data if isinstance(data, list) else [data]
+            names = [(d.get("Name", ""), int((d.get("AdapterRAM") or 0) / 1048576)) for d in data]
+        elif IS_LINUX:
+            out = _run(["lspci"])
+            names = [(ln.split(":", 2)[-1].strip(), 0) for ln in out.stdout.splitlines()
+                     if any(k in ln.lower() for k in ("vga", "3d", "display"))]
+        else:
+            names = []
+    except Exception:
+        names = []
+    for name, vram in names:
+        nl = name.lower()
+        vendor = ("NVIDIA" if "nvidia" in nl else
+                  "AMD" if ("amd" in nl or "radeon" in nl) else
+                  "Intel" if "intel" in nl else "Unknown")
+        gpus.append({"name": name, "vendor": vendor, "vram": vram,
+                     "compatible": vendor in ("NVIDIA", "AMD")})
     return gpus
 
+
+def has_gpu():
+    return any(g["compatible"] for g in detect_gpus())
+
+
+def current_watts(mode):
+    if mode == "gpu":
+        w = sum(g["power"] for g in nvidia_stats())
+        return w if w > 0 else float(cfg["power_watts_gpu"])
+    return float(cfg["power_watts_cpu"])
+
+
 # ══════════════════════════════════════════════════════════════════
-#  DOWNLOAD & EXTRACT
+#  DOWNLOAD & EKSTRAK (aman)
 # ══════════════════════════════════════════════════════════════════
-def download(url, dest, progress_cb=None):
+def download(url, dest, progress=None):
     try:
-        r = requests.get(url, stream=True, timeout=300, allow_redirects=True,
-                         headers={"User-Agent": f"Mozilla/5.0 {PEGASUS_BRAND}/19.0"})
+        r = requests.get(url, stream=True, timeout=300, allow_redirects=True, headers=UA)
         if r.status_code != 200:
-            return False
+            return None
         total = int(r.headers.get("content-length", 0))
-        done = 0
+        done, last, h = 0, -10, hashlib.sha256()
         with open(dest, "wb") as f:
             for chunk in r.iter_content(65536):
                 if chunk:
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress_cb and total:
-                        progress_cb(int(done * 100 / total))
-        return dest.stat().st_size > 1000
+                    f.write(chunk); h.update(chunk); done += len(chunk)
+                    if progress and total:
+                        pct = int(done * 100 / total)
+                        if pct - last >= 10:
+                            last = pct; progress(pct)
+        return h.hexdigest() if dest.stat().st_size > 1000 else None
     except Exception as e:
-        print(f"Download error: {e}")
-        return False
+        log(f"Download error: {e}", "err")
+        return None
 
-def extract_binary(archive, target_dir, binary_names):
+
+def safe_extract(archive, dest):
+    dest = Path(dest).resolve()
+    s = str(archive).lower()
+    if s.endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            for n in z.namelist():
+                if not (dest / n).resolve().is_relative_to(dest):
+                    raise ValueError("Arsip berisi path berbahaya")
+            z.extractall(dest)
+    elif s.endswith((".tar.gz", ".tgz")):
+        with tarfile.open(archive, "r:gz") as t:
+            for m in t.getmembers():
+                if not (dest / m.name).resolve().is_relative_to(dest) or m.issym() or m.islnk():
+                    raise ValueError("Arsip berisi entri berbahaya")
+            t.extractall(dest)
+    else:
+        raise ValueError("Format arsip tidak didukung")
+
+
+def ensure_binary(kind):
+    """Kembalikan Path executable miner; unduh jika belum ada."""
+    src = SOURCES[kind].get("windows" if IS_WIN else "linux") if (IS_WIN or IS_LINUX) else None
+    if not src:
+        log(f"{kind} tidak didukung di OS ini", "err")
+        return None
+    url, names = src
+    target_dir = MINER_DIR / kind
+    for n in names:
+        if (target_dir / n).exists():
+            return target_dir / n
+    log(f"Mengunduh {kind}...")
+    arc = BASE_DIR / (kind + (".zip" if url.endswith(".zip") else ".tar.gz"))
+    digest = download(url, arc, lambda p: log(f"    {p}%"))
+    if not digest:
+        log(f"Download {kind} gagal", "err")
+        return None
+    log(f"SHA256 unduhan: {digest}")
+    expected = cfg["sha256_" + kind].lower().strip()
+    if expected and expected != digest:
+        log("SHA256 TIDAK COCOK - dibatalkan!", "err")
+        arc.unlink(missing_ok=True)
+        return None
     tmp = Path(tempfile.mkdtemp(prefix="pegasus_"))
     try:
-        s = str(archive).lower()
-        if s.endswith(".zip"):
-            with zipfile.ZipFile(archive) as z: z.extractall(tmp)
-        elif s.endswith((".tar.gz", ".tgz")):
-            with tarfile.open(archive, "r:gz") as t: t.extractall(tmp)
-        else:
+        safe_extract(arc, tmp)
+        found = next((Path(r) / f for r, _, fs in os.walk(tmp) for f in fs
+                      if f.lower() in [n.lower() for n in names]), None)
+        if not found:
+            log("Binary tidak ditemukan di arsip", "err")
             return None
-        src = None
-        for r, _, files in os.walk(tmp):
-            for f in files:
-                if f.lower() in [n.lower() for n in binary_names]:
-                    src = Path(r) / f
-                    break
-            if src: break
-        if not src:
-            return None
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / src.name
-        shutil.copy2(src, target)
-        for item in src.parent.iterdir():
-            if item.name == src.name: continue
-            try:
-                if item.is_file(): shutil.copy2(item, target_dir / item.name)
-                elif item.is_dir(): shutil.copytree(item, target_dir / item.name, dirs_exist_ok=True)
-            except: pass
+        shutil.copytree(found.parent, target_dir, dirs_exist_ok=True)
+        exe = target_dir / found.name
         if not IS_WIN:
-            try: target.chmod(0o755)
-            except: pass
-        return target
+            exe.chmod(0o755)
+        log(f"{kind} siap: {exe}", "ok")
+        return exe
     except Exception as e:
-        print(f"Extract error: {e}")
+        log(f"Ekstrak gagal: {e}", "err")
         return None
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+        arc.unlink(missing_ok=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  STATISTIK REAL-TIME
+# ══════════════════════════════════════════════════════════════════
+class Stats:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.accepted = self.rejected = 0
+        self.hr10 = self.hr60 = self.hr15m = self.hr_max = 0.0
+        self.diff = 0
+        self.latency = 0
+        self.uptime = 0
+        self.pool = ""
+        self.connection = "OFFLINE"
+        self.source = "-"
+        self.hr_hist = deque(maxlen=120)
+
+    def best_hr(self):
+        return self.hr60 or self.hr10 or self.hr15m
+
+
+stats = Stats()
+_HR_UNITS = {"h/s": 1, "kh/s": 1e3, "mh/s": 1e6, "gh/s": 1e9, "th/s": 1e12}
+
+
+def poll_xmrig():
+    d = http_json(f"http://127.0.0.1:{XMRIG_API}/2/summary")
+    if not d:
+        return False
+    tot = ((d.get("hashrate") or {}).get("total") or []) + [0, 0, 0]
+    stats.hr10, stats.hr60, stats.hr15m = (float(x or 0) for x in tot[:3])
+    stats.hr_max = max(stats.hr_max, float((d.get("hashrate") or {}).get("highest") or 0), stats.hr10)
+    res, conn = d.get("results") or {}, d.get("connection") or {}
+    stats.accepted = int(res.get("shares_good", 0) or 0)
+    stats.rejected = max(0, int(res.get("shares_total", 0) or 0) - stats.accepted)
+    stats.diff = int(res.get("diff_current", 0) or 0)
+    stats.latency = int(conn.get("ping", 0) or 0)
+    stats.pool = str(conn.get("pool", ""))
+    stats.connection = "CONNECTED" if (conn.get("uptime") or 0) > 0 else "CONNECTING"
+    stats.uptime = int(d.get("uptime", 0) or 0)
+    stats.source = "xmrig-api"
+    return True
+
+
+def poll_lolminer():
+    d = http_json(f"http://127.0.0.1:{LOL_API}/")
+    if not d:
+        return False
+    alg = (d.get("Algorithms") or [{}])[0]
+    mult = _HR_UNITS.get(str(alg.get("Performance_Unit", "mh/s")).lower(), 1e6)
+    hr = _num(alg.get("Total_Performance")) * mult
+    stats.hr10 = stats.hr60 = stats.hr15m = hr
+    stats.hr_max = max(stats.hr_max, hr)
+    sess = d.get("Session") or {}
+    stats.accepted = int(_num(alg.get("Total_Accepted", sess.get("Accepted", 0))))
+    stats.rejected = int(_num(alg.get("Total_Rejected", 0)))
+    stats.uptime = int(_num(sess.get("Uptime", 0)))
+    stats.pool = str((d.get("Stratum") or {}).get("Current_Pool", ""))
+    stats.latency = int(_num((d.get("Stratum") or {}).get("Average_Latency", 0)))
+    stats.connection = "CONNECTED" if hr > 0 else "CONNECTING"
+    stats.source = "lolminer-api"
+    return True
+
+
+_RE_SPEED = re.compile(r"speed\s+10s/60s/15m\s+([\d.]+|n/a)\s+([\d.]+|n/a)\s+([\d.]+|n/a)\s+(\w+)/s", re.I)
+_RE_ACC = re.compile(r"accepted\s*\((\d+)/(\d+)\)", re.I)
+
+
+def poll_logfile(path):
+    """Cadangan jika API lokal tidak tersedia: baca ekor log XMRig."""
+    try:
+        lines = Path(path).read_text(errors="ignore").splitlines()[-60:]
+    except Exception:
+        return False
+    ok = False
+    for ln in lines:
+        m = _RE_SPEED.search(ln)
+        if m:
+            mult = {"h": 1, "kh": 1e3, "mh": 1e6, "gh": 1e9}.get(m.group(4).lower(), 1)
+            v = [_num(x) * mult for x in m.groups()[:3]]
+            stats.hr10, stats.hr60, stats.hr15m = v
+            stats.hr_max = max(stats.hr_max, v[0])
+            ok = True
+        m = _RE_ACC.search(ln)
+        if m:
+            stats.accepted, stats.rejected = int(m.group(1)), int(m.group(2))
+            ok = True
+    if ok:
+        stats.source = "log"
+        stats.connection = "CONNECTED"
+    return ok
+
+
+# ══════════════════════════════════════════════════════════════════
+#  RIWAYAT & BENCHMARK
+# ══════════════════════════════════════════════════════════════════
+class History:
+    def __init__(self):
+        self.db = load_json(HISTORY_DB, {"sessions": []})
+        self.cur = None
+
+    def start(self, algo, region, mode, watts):
+        self.cur = {"id": datetime.now().strftime("%Y%m%d_%H%M%S"), "algo": algo, "region": region,
+                    "mode": mode, "start": datetime.now().isoformat(timespec="seconds"), "end": None,
+                    "duration": 0, "accepted": 0, "rejected": 0, "hashrate_avg": 0.0,
+                    "hashrate_max": 0.0, "est_btc": 0.0, "est_usd": 0.0, "energy_kwh": 0.0,
+                    "cost_usd": 0.0, "_n": 0}
+
+    def update(self):
+        c = self.cur
+        if not c:
+            return
+        c["accepted"], c["rejected"] = stats.accepted, stats.rejected
+        hr = stats.best_hr()
+        if hr > 0:
+            c["hashrate_avg"] = (c["hashrate_avg"] * c["_n"] + hr) / (c["_n"] + 1)
+            c["_n"] += 1
+            c["hashrate_max"] = max(c["hashrate_max"], hr)
+
+    def accrue(self, btc, usd, kwh, cost):
+        if self.cur:
+            self.cur["est_btc"] += btc; self.cur["est_usd"] += usd
+            self.cur["energy_kwh"] += kwh; self.cur["cost_usd"] += cost
+
+    def end(self):
+        c = self.cur
+        if not c:
+            return
+        self.update()
+        c["end"] = datetime.now().isoformat(timespec="seconds")
+        c["duration"] = int((datetime.now() - datetime.fromisoformat(c["start"])).total_seconds())
+        self.db["sessions"].append({k: v for k, v in c.items() if not k.startswith("_")})
+        save_json(HISTORY_DB, self.db)
+        self.cur = None
+
+    def totals(self):
+        s = self.db["sessions"]
+        return {"sessions": len(s), "time": sum(x.get("duration", 0) for x in s),
+                "accepted": sum(x.get("accepted", 0) for x in s),
+                "rejected": sum(x.get("rejected", 0) for x in s),
+                "est_btc": sum(x.get("est_btc", 0) for x in s),
+                "est_usd": sum(x.get("est_usd", 0) for x in s),
+                "cost_usd": sum(x.get("cost_usd", 0) for x in s)}
+
+    def export_csv(self, path):
+        cols = ["id", "start", "end", "duration", "algo", "region", "mode", "accepted", "rejected",
+                "hashrate_avg", "hashrate_max", "est_btc", "est_usd", "energy_kwh", "cost_usd"]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(cols)
+            for s in self.db["sessions"]:
+                w.writerow([s.get(c, "") for c in cols])
+
+    def export_json(self, path):
+        save_json(path, self.db)
+
+    def clear(self):
+        self.db = {"sessions": []}
+        save_json(HISTORY_DB, self.db)
+
+
+history = History()
+
+
+def record_benchmark(algo, hashrate, watts, mode, force=False):
+    if hashrate <= 0:
+        return
+    db = load_json(BENCH_DB, {})
+    old = db.get(algo)
+    hr = hashrate if (force or not old) else old["hashrate"] * 0.7 + hashrate * 0.3
+    db[algo] = {"hashrate": hr, "watts": watts, "mode": mode, "ts": datetime.now().isoformat(timespec="seconds")}
+    save_json(BENCH_DB, db)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  MINER MANAGER
 # ══════════════════════════════════════════════════════════════════
+def pid_alive(pid):
+    try:
+        if psutil:
+            return psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def read_pidfile():
+    d = load_json(PID_FILE, None)
+    if d and pid_alive(int(d.get("pid", 0))):
+        return d
+    return None
+
+
 class MinerManager:
     def __init__(self):
         self.proc = None
+        self.owned = False
         self.start_t = None
         self.log_file = None
         self.log_handle = None
-        self.algo = DEFAULT_ALGO
-        self.region = DEFAULT_REGION
+        self.algo = cfg["algo"].upper()
+        self.region = cfg["region"]
         self.mode = "cpu"
         self.watchdog = False
-        self.xmrig_path = None
-        self.lolminer_path = None
-        self._last_history_update = 0
-        self._last_parse_offset = 0
-        self._parse_lock = threading.Lock()
-        self._last_btc_update = 0
+        self._wd = None
+        self._stopping = False
+        self._last_tick = time.time()
+        self._last_hist = 0.0
+        self._last_bench = 0.0
+        self._restarts = 0
 
+    # ---- status ----
     def is_running(self):
-        return self.proc is not None and self.proc.poll() is None
+        if self.proc is not None:
+            return self.proc.poll() is None
+        ext = read_pidfile()
+        if ext:  # miner dijalankan oleh proses lain: mode attach
+            self.algo, self.mode = ext.get("algo", self.algo), ext.get("mode", self.mode)
+            return True
+        return False
 
     def uptime(self):
-        if not self.start_t: return "00:00:00"
-        d = int((datetime.now() - self.start_t).total_seconds())
-        h, r = divmod(d, 3600); m, s = divmod(r, 60)
-        return f"{h:02d}:{m:02d}:{s:02d}"
+        return fmt_dur(time.time() - self.start_t) if self.start_t else fmt_dur(stats.uptime)
 
-    def ensure_xmrig(self, log):
-        if self.xmrig_path and self.xmrig_path.exists():
-            return self.xmrig_path
-        target = MINER_DIR / "xmrig" / ("xmrig.exe" if IS_WIN else "xmrig")
-        if target.exists():
-            self.xmrig_path = target
-            return target
-        url = XMRIG_URLS.get("windows" if IS_WIN else "linux")
-        if not url:
-            log("[X] XMRig tidak support OS ini"); return None
-        log("[*] Download XMRig (CPU miner)...")
-        ext = ".zip" if url.endswith(".zip") else ".tar.gz"
-        arc = BASE_DIR / f"xmrig{ext}"
-        if not download(url, arc, lambda p: log(f"    Progress: {p}%")):
-            log("[X] Download XMRig gagal"); return None
-        log("[*] Extract XMRig...")
-        exe = extract_binary(arc, MINER_DIR / "xmrig", ["xmrig.exe", "xmrig"])
-        try: arc.unlink()
-        except: pass
-        if exe:
-            self.xmrig_path = exe
-            log(f"[OK] XMRig siap: {exe.name}")
-        return exe
+    # ---- command builder ----
+    def _host(self, algo, region):
+        return f"{algo.lower()}.{region}.nicehash.com"
 
-    def ensure_lolminer(self, log):
-        if self.lolminer_path and self.lolminer_path.exists():
-            return self.lolminer_path
-        target = MINER_DIR / "lolminer" / ("lolMiner.exe" if IS_WIN else "lolMiner")
-        if target.exists():
-            self.lolminer_path = target
-            return target
-        url = LOLMINER_URLS.get("windows" if IS_WIN else "linux")
-        if not url:
-            log("[X] lolMiner tidak support OS ini"); return None
-        log("[*] Download lolMiner (GPU miner)...")
-        ext = ".zip" if url.endswith(".zip") else ".tar.gz"
-        arc = BASE_DIR / f"lolminer{ext}"
-        if not download(url, arc, lambda p: log(f"    Progress: {p}%")):
-            log("[X] Download lolMiner gagal"); return None
-        log("[*] Extract lolMiner...")
-        exe = extract_binary(arc, MINER_DIR / "lolminer", ["lolMiner.exe", "lolMiner"])
-        try: arc.unlink()
-        except: pass
-        if exe:
-            self.lolminer_path = exe
-            log(f"[OK] lolMiner siap: {exe.name}")
-        return exe
+    def _cmd_xmrig(self, exe, algo, region):
+        cmd = [str(exe), "-o", f"{self._host(algo, region)}:{cfg['port']}",
+               "-u", f"{cfg['wallet']}.{cfg['worker']}", "-p", "x", "-a", CPU_ALGOS[algo],
+               "-k", "--nicehash", "--no-color", "--print-time", "10", "--donate-level", "1",
+               "--retries", "5", "--retry-pause", "5",
+               "--http-host", "127.0.0.1", "--http-port", str(XMRIG_API),
+               "--cpu-priority", str(cfg["cpu_priority"])]
+        if int(cfg["cpu_threads_pct"]) < 100:
+            cmd.append(f"--cpu-max-threads-hint={int(cfg['cpu_threads_pct'])}")
+        return cmd
 
-    def start(self, algo=None, region=None, log=print):
-        algo = algo or self.algo
+    def _cmd_lol(self, exe, algo, region):
+        lol = GPU_ALGOS[algo]
+        cmd = [str(exe), "--algo", lol, "--pool", f"{self._host(algo, region)}:{cfg['port']}",
+               "--user", f"{cfg['wallet']}.{cfg['worker']}", "--pass", "x", "--tls", "0",
+               "--apiport", str(LOL_API), "--nocolor"]
+        if lol == "ETCHASH":
+            cmd += ["--ethstratum", "ETHV1"]
+        return cmd
+
+    # ---- start / stop ----
+    def start(self, algo=None, region=None, say=log):
+        algo = (algo or self.algo).upper()
         region = region or self.region
-        algo_up = algo.upper()
-
         if self.is_running():
-            log("[!] Miner sudah jalan")
+            say("Miner sudah berjalan", "warn")
             return True
-
-        if algo_up in [a.upper() for a in CPU_ALGOS]:
-            mode = "cpu"
-        else:
-            mode = "gpu"
-
-        self.mode = mode
-        log(f"[*] Mode: {'CPU (XMRig)' if mode == 'cpu' else 'GPU (lolMiner)'}")
-
-        if mode == "cpu":
-            exe = self.ensure_xmrig(log)
-            if not exe:
-                log("[X] Gagal siapkan XMRig"); return False
-            cmd = self._build_xmrig_cmd(exe, algo_up, region)
-        else:
-            gpus = [g for g in detect_gpus() if g["compatible"]]
-            if not gpus:
-                log("[!] Tidak ada GPU kompatibel, fallback ke CPU")
-                return self.start("RANDOMXMONERO", region, log)
-            exe = self.ensure_lolminer(log)
-            if not exe:
-                log("[X] Gagal siapkan lolMiner"); return False
-            cmd = self._build_lolminer_cmd(exe, algo_up, region)
-
-        if not cmd:
-            log("[X] Gagal buat command")
+        if not cfg["wallet"]:
+            say("Wallet belum diatur: python ... config wallet <alamat>", "err")
             return False
+        if region not in REGIONS:
+            say(f"Region tidak valid: {', '.join(REGIONS)}", "err")
+            return False
+        if algo in CPU_ALGOS:
+            mode = "cpu"
+        elif algo in GPU_ALGOS:
+            mode = "gpu"
+            if not has_gpu():
+                say("Tidak ada GPU NVIDIA/AMD yang kompatibel. Pakai algoritma CPU.", "err")
+                return False
+        else:
+            say(f"Algoritma tidak didukung: {algo}", "err")
+            return False
+        exe = ensure_binary("xmrig" if mode == "cpu" else "lolminer")
+        if not exe:
+            return False
+        cmd = (self._cmd_xmrig if mode == "cpu" else self._cmd_lol)(exe, algo, region)
+        say(f"Mode {mode.upper()} | {algo} | {self._host(algo, region)}:{cfg['port']}")
 
-        log(f"[*] Command: {' '.join(str(c) for c in cmd[:4])} ...")
-
-        self.log_file = LOGS_DIR / f"pegasus_{datetime.now():%Y%m%d_%H%M%S}.log"
+        self.log_file = LOGS_DIR / f"miner_{datetime.now():%Y%m%d_%H%M%S}.log"
+        kw = ({"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True})
         try:
             self.log_handle = open(self.log_file, "w", encoding="utf-8", errors="ignore")
-            flags = 0
-            if IS_WIN:
-                flags = subprocess.CREATE_NEW_PROCESS_GROUP
-            self.proc = subprocess.Popen(
-                cmd, stdout=self.log_handle, stderr=subprocess.STDOUT,
-                creationflags=flags, cwd=str(exe.parent)
-            )
-            self.start_t = datetime.now()
-            self.algo = algo_up
-            self.region = region
-            self._last_parse_offset = 0
-
-            detector.reset()
-            detector.connection_status = "CONNECTING"
-
-            history.start_session(algo_up, region, mode)
-
-            time.sleep(5)
-            if self.proc.poll() is not None:
-                log("[X] Miner langsung mati! Log terakhir:")
-                for line in self._tail(10):
-                    log(f"    {line}")
-                history.end_session()
-                return False
-
-            log(f"[OK] MINER JALAN - PID {self.proc.pid}")
-            self.watchdog = True
-            threading.Thread(target=self._watch, daemon=True).start()
-            return True
+            self.proc = subprocess.Popen(cmd, stdout=self.log_handle, stderr=subprocess.STDOUT,
+                                         cwd=str(exe.parent), **kw)
         except Exception as e:
-            log(f"[X] Error start: {e}")
-            history.end_session()
+            say(f"Gagal start: {e}", "err")
             return False
+        self.owned, self._stopping = True, False
+        self.algo, self.region, self.mode = algo, region, mode
+        self.start_t = time.time()
+        self._last_tick = time.time()
+        stats.reset()
+        stats.connection = "CONNECTING"
+        save_json(PID_FILE, {"pid": self.proc.pid, "algo": algo, "mode": mode, "region": region,
+                             "started": datetime.now().isoformat(timespec="seconds")})
+        history.start(algo, region, mode, current_watts(mode))
+        time.sleep(6)
+        if self.proc.poll() is not None:
+            say("Miner langsung berhenti. Log terakhir:", "err")
+            for ln in self._tail(8):
+                say("    " + ln, "err")
+            self._cleanup()
+            return False
+        say(f"MINER BERJALAN - PID {self.proc.pid}", "ok")
+        self.watchdog = True
+        if not (self._wd and self._wd.is_alive()):
+            self._wd = threading.Thread(target=self._watch, daemon=True)
+            self._wd.start()
+        return True
 
-    def _build_xmrig_cmd(self, exe, algo, region):
-        port = get_pool_port(algo)
-        pool = f"{algo.lower()}.{region}.nicehash.com:{port}"
-        cmd = [
-            str(exe), "-o", pool,
-            "-u", f"{WALLET}.{WORKER}",
-            "-p", "x",
-            "-a", "rx/0" if algo == "RANDOMXMONERO" else algo.lower(),
-            "-k", "--no-color",
-            "--print-time", "5",
-            "--donate-level", "1",
-            "--retries", "5",
-            "--retry-pause", "5",
-        ]
-        return cmd
-
-    def _build_lolminer_cmd(self, exe, algo, region):
-        port = get_pool_port(algo)
-        pool = f"{algo.lower()}.{region}.nicehash.com:{port}"
-        algo_map = {
-            "KAWPOW": "KAWPOW", "AUTOLYKOS": "AUTOLYKOS", "OCTOPUS": "OCTOPUS",
-            "FISHHASH": "FISHHASH", "BEAMV3": "BEAMV3",
-            "DAGGERHASHIMOTO": "ETCHASH", "ETCHASH": "ETCHASH",
-            "KHEAVYHASH": "KHEAVYHASH",
-        }
-        lol_algo = algo_map.get(algo, algo)
-        cmd = [
-            str(exe), "--algo", lol_algo,
-            "--pool", pool,
-            "--user", f"{WALLET}.{WORKER}",
-            "--pass", "x",
-            "--apiport", "0", "--nocolor",
-        ]
-        return cmd
-
-    def _tail(self, n=30):
-        if not self.log_file or not self.log_file.exists():
-            return []
+    def _tail(self, n=20):
         try:
-            with open(self.log_file, "r", errors="ignore") as f:
-                return [l.rstrip() for l in f.readlines()[-n:]]
-        except: return []
+            return Path(self.log_file).read_text(errors="ignore").splitlines()[-n:]
+        except Exception:
+            return []
 
-    def parse_log(self):
-        if not self.log_file or not self.log_file.exists():
-            return
-        with self._parse_lock:
-            try:
-                with open(self.log_file, "r", errors="ignore") as f:
-                    f.seek(self._last_parse_offset)
-                    new_lines = f.readlines()
-                    self._last_parse_offset = f.tell()
-            except:
-                return
-
-            for line in new_lines:
-                if self.mode == "cpu":
-                    detector.parse_xmrig_line(line)
-                else:
-                    detector.parse_lolminer_line(line)
-
-            if self.is_running():
-                if time.time() - self._last_history_update > 30:
-                    self._last_history_update = time.time()
-                    history.update_session(detector.accepted, detector.rejected,
-                                            detector.hashrate_60s)
-
-                if time.time() - self._last_btc_update > 10:
-                    self._last_btc_update = time.time()
-                    algos = get_nh_algos()
-                    paying = algos.get(self.algo, {}).get("paying", 0)
-                    detector.update_btc_earnings(paying)
+    def _cleanup(self):
+        try:
+            if self.log_handle:
+                self.log_handle.close()
+        except Exception:
+            pass
+        self.log_handle = None
+        PID_FILE.unlink(missing_ok=True)
+        stats.connection = "OFFLINE"
+        history.end()
+        self.proc, self.start_t = None, None
 
     def stop(self):
-        stopped = False
-        if self.proc and self.proc.poll() is None:
+        self._stopping, self.watchdog = True, False
+        p = self.proc
+        if p is not None and p.poll() is None:
             try:
                 if IS_WIN:
-                    import signal as _sig
-                    self.proc.send_signal(_sig.SIGTERM)
+                    import signal
+                    p.send_signal(signal.CTRL_BREAK_EVENT)
                 else:
-                    self.proc.terminate()
-                try: self.proc.wait(timeout=5)
-                except: self.proc.kill()
-                stopped = True
+                    p.terminate()
+                p.wait(timeout=8)
             except Exception:
-                try: self.proc.kill(); stopped = True
-                except: pass
-        for p in psutil.process_iter(["name"]):
-            try:
-                nm = (p.info.get("name") or "").lower()
-                if nm in ("xmrig.exe","xmrig","lolminer.exe","lolminer"):
-                    p.kill(); stopped = True
-            except: pass
-        try:
-            if self.log_handle: self.log_handle.close(); self.log_handle = None
-        except: pass
-        self.watchdog = False
-        detector.connection_status = "OFFLINE"
-        history.end_session()
-        btc_wallet.record_snapshot()
-        return stopped
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        elif p is None:
+            return stop_external()
+        self._cleanup()
+        return True
 
     def _watch(self):
         while self.watchdog:
-            time.sleep(15)
-            if not self.watchdog: break
-            if self.start_t and not self.is_running():
-                self.watchdog = False
-                history.end_session()
-                time.sleep(10)
-                self.start(self.algo, self.region, lambda m: None)
+            time.sleep(10)
+            if not self.watchdog or self._stopping:
                 break
+            if self.proc is not None and self.proc.poll() is not None:
+                if self.start_t and time.time() - self.start_t > 600:
+                    self._restarts = 0
+                if self._restarts >= 5:
+                    log("Miner mati terus - watchdog berhenti", "err")
+                    self._cleanup()
+                    break
+                self._restarts += 1
+                algo, region = self.algo, self.region
+                log(f"Miner mati, restart #{self._restarts}...", "warn")
+                self._cleanup()
+                time.sleep(min(60, 5 * self._restarts))
+                if not self.start(algo, region, lambda m, t="info": None):
+                    continue
+
+    # ---- siklus real-time ----
+    def poll(self):
+        ok = poll_xmrig() if self.mode == "cpu" else poll_lolminer()
+        if not ok and self.log_file and self.mode == "cpu":
+            poll_logfile(self.log_file)
+        stats.hr_hist.append(stats.best_hr())
+
+    def tick(self):
+        self.poll()
+        now = time.time()
+        dt, self._last_tick = now - self._last_tick, now
+        if not self.is_running() or dt > 60:
+            return
+        hr, w = stats.best_hr(), current_watts(self.mode)
+        est = profit_estimate(self.algo, hr, w)
+        if est:
+            history.accrue(est["rev_btc_day"] * dt / 86400, est["rev_usd_day"] * dt / 86400,
+                           w / 1000 * dt / 3600, est["cost_usd_day"] * dt / 86400)
+        if now - self._last_hist > 30:
+            self._last_hist = now
+            history.update()
+        if self.start_t and now - self.start_t > 180 and now - self._last_bench > 60 and hr > 0:
+            self._last_bench = now
+            record_benchmark(self.algo, hr, w, self.mode)
+
+    def autoswitch(self):
+        bench = load_json(BENCH_DB, {})
+        best, best_net = None, None
+        for algo, b in bench.items():
+            if (b["mode"] == "gpu" and not has_gpu()) or algo not in {**CPU_ALGOS, **GPU_ALGOS}:
+                continue
+            e = profit_estimate(algo, b["hashrate"], b["watts"])
+            if e and (best_net is None or e["net_usd_day"] > best_net):
+                best, best_net = algo, e["net_usd_day"]
+        cur = bench.get(self.algo)
+        cur_est = profit_estimate(self.algo, cur["hashrate"], cur["watts"]) if cur else None
+        cur_net = cur_est["net_usd_day"] if cur_est else float("-inf")
+        margin = float(cfg["autoswitch_margin"])
+        if best and best != self.algo and best_net > cur_net + abs(cur_net if cur_net != float("-inf") else 0) * margin:
+            log(f"Auto-switch {self.algo} -> {best} (net ${best_net:.4f}/hari)", "gold")
+            region = self.region
+            self.stop()
+            time.sleep(2)
+            self.start(best, region)
+
 
 miner = MinerManager()
 
+
+def stop_external():
+    d = read_pidfile()
+    if not d:
+        return False
+    pid = int(d["pid"])
+    try:
+        if psutil:
+            pr = psutil.Process(pid)
+            if not any(k in pr.name().lower() for k in ("xmrig", "lolminer")):
+                log("PID bukan proses miner - tidak dihentikan", "err")
+                return False
+            pr.terminate()
+            try:
+                pr.wait(8)
+            except Exception:
+                pr.kill()
+        else:
+            os.kill(pid, 15)
+    except Exception as e:
+        log(f"Gagal menghentikan: {e}", "err")
+        return False
+    PID_FILE.unlink(missing_ok=True)
+    return True
+
+
 # ══════════════════════════════════════════════════════════════════
-#  CLI TOOLS FUNCTIONS
+#  DASHBOARD
 # ══════════════════════════════════════════════════════════════════
-def clear_screen():
-    os.system("cls" if IS_WIN else "clear")
+def render_dashboard():
+    s, hr = stats, stats.best_hr()
+    w = current_watts(miner.mode)
+    est = profit_estimate(miner.algo, hr, w)
+    price = get_prices().get("usd", 0)
+    run = miner.is_running()
+    L = []
+    add = L.append
+    bar = "─" * 66
+    add(f"{C.BOLD}{C.CYAN}PEGASUS NICEHASH MINER v{VERSION}{C.RESET}   {C.GRAY}{datetime.now():%Y-%m-%d %H:%M:%S}{C.RESET}")
+    add(bar)
+    status = f"{C.GREEN}● MINING{C.RESET}" if run else f"{C.RED}○ OFFLINE{C.RESET}"
+    add(f" Status   {status}   Uptime {C.YELLOW}{miner.uptime()}{C.RESET}   Sumber data: {s.source}")
+    add(f" Algo     {C.YELLOW}{miner.algo}{C.RESET} ({miner.mode.upper()})   Region {miner.region}   Pool {s.pool or '-'}")
+    add(bar)
+    add(f" Hashrate  60s {C.GREEN}{fmt_hr(s.hr60)}{C.RESET} | 10s {fmt_hr(s.hr10)} | 15m {fmt_hr(s.hr15m)} | max {fmt_hr(s.hr_max)}")
+    add(f" Tren      {C.GREEN}{spark(s.hr_hist)}{C.RESET}")
+    add(f" Share     diterima {C.GREEN}{s.accepted}{C.RESET} | ditolak {C.RED}{s.rejected}{C.RESET} | diff {s.diff} | latency {s.latency} ms")
+    add(f" Koneksi   {C.GREEN if s.connection == 'CONNECTED' else C.YELLOW}{s.connection}{C.RESET}")
+    add(bar)
+    if miner.mode == "gpu":
+        for i, g in enumerate(nvidia_stats()):
+            add(f" GPU{i}     {g['name'][:28]} | {g['temp']:.0f}°C | {g['power']:.0f} W | util {g['util']:.0f}%")
+    c = cpu_stats()
+    add(f" CPU       load {c['load'] if c['load'] is not None else '-'}% | suhu {('%.0f°C' % c['temp']) if c['temp'] else '-'} | daya (config) {w:.0f} W")
+    add(bar)
+    if est:
+        col = C.GREEN if est["net_usd_day"] > 0 else C.RED
+        add(f" ESTIMASI/HARI  pendapatan ${est['rev_usd_day']:.4f} ({est['rev_btc_day']:.8f} BTC)")
+        add(f"                listrik   ${est['cost_usd_day']:.4f}   NET {col}${est['net_usd_day']:.4f}{C.RESET}")
+    else:
+        add(f" ESTIMASI/HARI  menunggu hashrate / data harga NiceHash...")
+    cur = history.cur
+    if cur:
+        add(f" SESI INI (est) {cur['est_btc']:.10f} BTC (${cur['est_usd']:.5f}) | listrik ${cur['cost_usd']:.5f} | {cur['energy_kwh']:.4f} kWh")
+    if nh.configured():
+        bal = cached("balance", 60, lambda: nh.btc_balance()[0])
+        if bal:
+            add(f" SALDO ASLI NiceHash  tersedia {C.YELLOW}{_num(bal.get('available')):.8f}{C.RESET} BTC "
+                f"(${_num(bal.get('available')) * price:.2f})")
+    else:
+        add(f" {C.GRAY}Saldo asli: isi API key read-only (config nh_api_key / nh_api_secret / nh_org_id){C.RESET}")
+    add(bar)
+    add(f" {C.GRAY}Estimasi belum termasuk fee NiceHash. Ctrl+C untuk keluar.{C.RESET}")
+    return L
 
-def print_banner():
-    clear_screen()
-    print(f"{C.GREEN}{PEGASUS_ASCII.format(url=PEGASUS_URL)}{C.RESET}")
-    print(f"{C.YELLOW}{C.BOLD}  [ {PEGASUS_BRAND} — NICEHASH MINER v19.0 CLI TOOLS ]{C.RESET}")
-    print(f"{C.CYAN}  Visit: {PEGASUS_URL}{C.RESET}")
-    print(f"{C.GREEN}  {'=' * 64}{C.RESET}")
 
-def print_log(msg, tag="info"):
-    colors = {
-        "ok":   C.GREEN, "err": C.RED, "warn": C.YELLOW,
-        "info": C.WHITE, "cyan": C.CYAN, "mag": C.MAGENTA, "gold": C.GOLD,
-    }
-    ts = datetime.now().strftime("%H:%M:%S")
-    color = colors.get(tag, C.WHITE)
-    print(f"{C.GRAY}[{ts}]{C.RESET} {color}{msg}{C.RESET}")
+def draw(lines):
+    sys.stdout.write("\033[H" + "".join(ln + "\033[K\n" for ln in lines) + "\033[J")
+    sys.stdout.flush()
 
-def status_bar():
-    running = miner.is_running()
-    bal = btc_wallet.get_balance()
-    lvl = booster.get_current_level()
-    s = history.get_stats()
-    tt = s["total_time"]
-    h, r = divmod(tt, 3600); m, sec = divmod(r, 60)
-    status = f"{C.GREEN}● MINING{C.RESET}" if running else f"{C.RED}○ OFFLINE{C.RESET}"
-    hr = detector.format_hashrate(detector.hashrate_60s)
-    print(f"\n{C.GRAY}{'─' * 64}{C.RESET}")
-    print(f"  Status : {status}   Uptime: {C.YELLOW}{miner.uptime()}{C.RESET}   "
-          f"Hashrate: {C.GREEN}{hr}{C.RESET}")
-    print(f"  BTC    : {C.GOLD}{bal:.10f}{C.RESET}   "
-          f"Booster: {lvl['color']}{lvl['name']} x{lvl['mult']:.2f}{C.RESET}   "
-          f"Shares: {C.CYAN}{btc_wallet.wallet.get('total_shares',0)}{C.RESET}")
-    print(f"  Session: {C.MAGENTA}{s['total_sessions']}{C.RESET}  "
-          f"Time: {C.YELLOW}{h:02d}h {m:02d}m {sec:02d}s{C.RESET}  "
-          f"Accepted: {C.GREEN}{detector.accepted}{C.RESET}  "
-          f"Rejected: {C.RED}{detector.rejected}{C.RESET}")
-    print(f"{C.GRAY}{'─' * 64}{C.RESET}\n")
 
-def print_stats():
-    status_bar()
-    print(f"  {C.BOLD}REAL-TIME DETECTION{C.RESET}")
-    print(f"    Hashrate 60s  : {C.GREEN}{detector.format_hashrate(detector.hashrate_60s)}{C.RESET}")
-    print(f"    Hashrate 10s  : {C.GREEN_D}{detector.format_hashrate(detector.hashrate_10s)}{C.RESET}")
-    print(f"    Hashrate 15m  : {C.GREEN_D}{detector.format_hashrate(detector.hashrate_15m)}{C.RESET}")
-    print(f"    Hashrate Max  : {C.ORANGE}{detector.format_hashrate(detector.hashrate_max)}{C.RESET}")
-    print(f"    Accepted      : {C.GREEN}{detector.accepted}{C.RESET}")
-    print(f"    Rejected      : {C.RED}{detector.rejected}{C.RESET}")
-    print(f"    Difficulty    : {C.CYAN}{detector.difficulty}{C.RESET}")
-    print(f"    Pool Latency  : {C.CYAN}{detector.pool_latency} ms{C.RESET}")
-    print(f"    Avg Share Int : {C.YELLOW}{detector.avg_share_interval:.0f} s{C.RESET}" if detector.avg_share_interval > 0 else f"    Avg Share Int : {C.YELLOW}-{C.RESET}")
-    print(f"    Jobs Received : {C.CYAN}{detector.job_count}{C.RESET}")
-    print(f"    Connection    : {C.GREEN if detector.connection_status == 'CONNECTED' else C.RED}{detector.connection_status}{C.RESET}")
-    print(f"    First Share   : {C.GREEN + 'YES' if detector.first_share_received else C.RED + 'NO'}{C.RESET}")
-    print(f"\n  {C.BOLD}CONFIG{C.RESET}")
-    print(f"    Algo   : {C.YELLOW}{miner.algo}{C.RESET}")
-    print(f"    Region : {C.YELLOW}{miner.region.upper()}{C.RESET}")
-    print(f"    Mode   : {C.CYAN}{'CPU/XMRig' if miner.mode == 'cpu' else 'GPU/lolMiner'}{C.RESET}")
-    print(f"    Wallet : {C.CYAN}{WALLET}{C.RESET}")
-    print(f"    Worker : {C.CYAN}{WORKER}{C.RESET}")
+def live_loop():
+    sys.stdout.write("\033[2J")
+    last_switch = last_snap = time.time()
+    try:
+        while miner.is_running():
+            miner.tick()
+            draw(render_dashboard())
+            now = time.time()
+            if now - last_snap > 300:
+                last_snap = now
+                snapshot_balance()
+            if miner.owned and cfg["autoswitch"] and now - last_switch > float(cfg["autoswitch_minutes"]) * 60:
+                last_switch = now
+                miner.autoswitch()
+            time.sleep(2)
+        print()
+        log("Miner berhenti.", "warn")
+    except KeyboardInterrupt:
+        print()
+        if miner.owned:
+            log("Menghentikan miner...", "warn")
+            miner.stop()
+            log("Miner dihentikan, sesi tersimpan.", "ok")
+        else:
+            log("Dashboard ditutup (miner tetap berjalan).", "info")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PERINTAH CLI
+# ══════════════════════════════════════════════════════════════════
+def banner():
+    print(f"{C.BOLD}{C.CYAN}=== {BRAND} - NICEHASH MINER v{VERSION} (open source, MIT) ==={C.RESET}\n")
+
 
 def cmd_start(args):
-    algo = args.algo.upper() if args.algo else miner.algo
-    region = args.region.lower() if args.region else miner.region
-    print_log(f"START MINING — Algo: {algo} | Region: {region.upper()}", "ok")
-    ok = miner.start(algo, region, lambda m: print_log(m, "info"))
-    if ok:
-        print_log("[OK] Mining berjalan! Tekan Ctrl+C untuk stop.", "ok")
-        print_log("BTC akan otomatis ditambahkan ke saldo (disimpan permanen)", "gold")
-        # Live monitoring loop
-        try:
-            while miner.is_running():
-                time.sleep(2)
-                miner.parse_log()
-                # Update line (no screen clear, just print new stats)
-                print(f"\r{C.GREEN}Hashrate: {detector.format_hashrate(detector.hashrate_60s)}"
-                      f" | Accepted: {detector.accepted}"
-                      f" | Rejected: {detector.rejected}"
-                      f" | BTC: {btc_wallet.get_balance():.10f}"
-                      f" | Uptime: {miner.uptime()}{C.RESET}", end="")
-        except KeyboardInterrupt:
-            print()
-            print_log("[*] Stop mining...", "warn")
-            miner.stop()
-            print_log("[OK] Miner dihentikan, session tersimpan", "ok")
-            print_log(f"Saldo BTC: {btc_wallet.get_balance():.10f} BTC (persistent)", "gold")
-    else:
-        print_log("[X] Gagal start mining", "err")
+    algo = args.algo.upper() if args.algo else cfg["algo"].upper()
+    region = args.region.lower() if args.region else cfg["region"]
+    if miner.start(algo, region):
+        live_loop()
+
 
 def cmd_stop(args):
-    print_log("[*] Stop mining...", "warn")
-    miner.stop()
-    print_log("[OK] Miner dihentikan", "ok")
-    print_log(f"[OK] Saldo BTC: {btc_wallet.get_balance():.10f} BTC (persistent)", "gold")
+    if miner.proc is None:
+        ok = stop_external()
+    else:
+        ok = miner.stop()
+    log("Miner dihentikan." if ok else "Tidak ada miner yang berjalan.", "ok" if ok else "warn")
+
+
+def cmd_dashboard(args):
+    if not miner.is_running():
+        log("Tidak ada miner yang berjalan. Jalankan: start", "warn")
+        return
+    live_loop()
+
 
 def cmd_status(args):
-    miner.parse_log()
-    print_banner()
-    print_stats()
+    if miner.is_running():
+        miner.poll()
+    draw_lines = render_dashboard()
+    print("\n".join(draw_lines))
+
 
 def cmd_wallet(args):
-    print_banner()
-    w = btc_wallet.wallet
-    bal = w["balance_btc"]
-    p = get_btc_price()
-    usd = bal * p.get("usd", 0)
-    idr = bal * p.get("idr", 0)
-    lvl = booster.get_current_level()
-    nxt = booster.get_next_level()
-
-    print(f"  {C.GOLD}{C.BOLD}>> BTC WALLET (PERSISTENT){C.RESET}")
-    print(f"  {'─' * 50}")
-    print(f"  {'Balance':<22}: {C.GOLD}{C.BOLD}{bal:.10f} BTC{C.RESET}")
-    print(f"  {'USD Value':<22}: {C.GREEN}${usd:,.4f}{C.RESET}")
-    print(f"  {'IDR Value':<22}: {C.GREEN}Rp {idr:,.0f}{C.RESET}")
-    print(f"  {'Total Earned':<22}: {C.YELLOW}{w['total_earned_btc']:.10f} BTC{C.RESET}")
-    print(f"  {'Total Earned USD':<22}: {C.GREEN}${w['total_earned_usd']:,.4f}{C.RESET}")
-    print(f"  {'Total Earned IDR':<22}: {C.GREEN}Rp {w['total_earned_idr']:,.0f}{C.RESET}")
-    print(f"  {'Total Withdrawn':<22}: {C.RED}{w['total_withdrawn_btc']:.10f} BTC{C.RESET}")
-    print(f"  {'Total Shares':<22}: {C.CYAN}{w.get('total_shares',0)}{C.RESET}")
-    print(f"  {'Total Mining Time':<22}: {C.YELLOW}{w.get('total_mining_seconds',0)}s{C.RESET}")
-    print(f"  {'Sessions Count':<22}: {C.MAGENTA}{w.get('sessions_count',0)}{C.RESET}")
-    print(f"  {'Wallet Address':<22}: {C.CYAN}{WALLET}{C.RESET}")
-    print(f"  {'Worker':<22}: {C.CYAN}{WORKER}{C.RESET}")
-    print(f"\n  {C.MAGENTA}{C.BOLD}>> BTC BOOSTER{C.RESET}")
-    print(f"  {'─' * 50}")
-    print(f"  {'Level':<22}: {lvl['color']}{C.BOLD}{lvl['name']}{C.RESET}")
-    print(f"  {'Multiplier':<22}: {C.YELLOW}x{lvl['mult']:.2f}{C.RESET}")
-    print(f"  {'Active':<22}: {C.GREEN if w.get('booster_active', True) else C.RED}{w.get('booster_active', True)}{C.RESET}")
-    progress = booster.get_progress()
-    bar_len = 30
-    filled = int(bar_len * progress / 100)
-    bar = f"{C.GREEN}{'█' * filled}{C.GRAY}{'░' * (bar_len - filled)}{C.RESET}"
-    print(f"  Progress : [{bar}] {progress:.1f}%")
-    if nxt:
-        shares = w.get("total_shares", 0)
-        print(f"  Next     : {nxt['color']}{nxt['name']}{C.RESET} (x{nxt['mult']:.2f}) "
-              f"— {C.CYAN}{shares}/{nxt['req_shares']}{C.RESET} shares")
-    else:
-        print(f"  {C.GOLD}>> MAX LEVEL REACHED! <<{C.RESET}")
-    print(f"\n  DB Path : {WALLET_DB}")
-
-def cmd_booster(args):
-    print_banner()
-    w = btc_wallet.wallet
-    shares = w.get("total_shares", 0)
-    lvl = booster.get_current_level()
-    print(f"  {C.MAGENTA}{C.BOLD}>> BTC BOOSTER LEVELS{C.RESET}")
-    print(f"  {'─' * 60}")
-    print(f"  {'LEVEL':<16}{'MULTIPLIER':<14}{'REQ SHARES':<14}{'STATUS':<10}")
-    print(f"  {'─' * 60}")
-    for l in booster.levels:
-        unlocked = shares >= l["req_shares"]
-        marker = f"{C.GREEN}[OK]{C.RESET}" if unlocked else f"{C.GRAY}[--]{C.RESET}"
-        color = l["color"] if unlocked else C.GRAY
-        current = " < CURRENT" if l["name"] == lvl["name"] else ""
-        print(f"  {marker} {color}{l['name']:<14}{C.RESET}"
-              f"x{l['mult']:<12.2f}"
-              f"{l['req_shares']:<14}"
-              f"{C.GREEN + 'UNLOCKED' + C.RESET if unlocked else C.GRAY + 'LOCKED' + C.RESET}"
-              f"{C.YELLOW}{current}{C.RESET}")
-    print(f"\n  Total Shares: {C.CYAN}{shares}{C.RESET}")
-    if args.toggle:
-        new_state = not w.get("booster_active", True)
-        btc_wallet.set_booster(new_state, lvl["mult"])
-        print_log(f"Booster {'AKTIF' if new_state else 'NONAKTIF'}", "ok")
-
-def cmd_history(args):
-    print_banner()
-    s = history.get_stats()
-    tt = s["total_time"]
-    h, r = divmod(tt, 3600); m, sec = divmod(r, 60)
-    print(f"  {C.MAGENTA}{C.BOLD}>> MINING HISTORY{C.RESET}")
-    print(f"  {'─' * 70}")
-    print(f"  Total Sessions : {C.CYAN}{s['total_sessions']}{C.RESET}")
-    print(f"  Total Time     : {C.YELLOW}{h:02d}h {m:02d}m {sec:02d}s{C.RESET}")
-    print(f"  Total Accepted : {C.GREEN}{s['total_accepted']}{C.RESET}")
-    print(f"  Total Rejected : {C.RED}{s['total_rejected']}{C.RESET}")
-    print(f"  Total BTC      : {C.GOLD}{btc_wallet.wallet['total_earned_btc']:.8f}{C.RESET}")
-    print(f"  {'─' * 70}")
-    if not s["sessions"]:
-        print(f"  {C.GRAY}Belum ada session.{C.RESET}")
-        return
-    print(f"  {'ID':<18}{'DUR':<10}{'ALGO':<20}{'MODE':<10}{'ACC':<6}{'REJ':<6}{'BTC':<14}")
-    print(f"  {'─' * 70}")
-    for sess in reversed(s["sessions"][-20:]):
-        dur = sess.get("duration", 0)
-        h2, r2 = divmod(dur, 3600); m2, sec2 = divmod(r2, 60)
-        dur_str = f"{h2:02d}:{m2:02d}:{sec2:02d}"
-        print(f"  {sess.get('id',''):<18}{dur_str:<10}"
-              f"{sess.get('algo',''):<20}{sess.get('mode','').upper():<10}"
-              f"{sess.get('accepted',0):<6}{sess.get('rejected',0):<6}"
-              f"{sess.get('btc_earned',0):<14.10f}")
-    if len(s["sessions"]) > 20:
-        print(f"  {C.GRAY}... dan {len(s['sessions']) - 20} session lainnya{C.RESET}")
-
-def cmd_export(args):
-    fmt = args.format.lower()
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    if fmt == "csv":
-        path = BASE_DIR / f"pegasus_history_{ts}.csv"
-        ok = history.export_csv(path)
-        print_log(f"[OK] CSV exported: {path}" if ok else "[X] Gagal export CSV",
-                  "ok" if ok else "err")
-    elif fmt == "json":
-        path = BASE_DIR / f"pegasus_history_{ts}.json"
-        ok = history.export_json(path)
-        print_log(f"[OK] JSON exported: {path}" if ok else "[X] Gagal export JSON",
-                  "ok" if ok else "err")
-    else:
-        print_log("[X] Format harus 'csv' atau 'json'", "err")
-
-def cmd_clear_history(args):
-    confirm = input(f"{C.YELLOW}Yakin hapus SEMUA history? (yes/no): {C.RESET}")
-    if confirm.lower() == "yes":
-        history.clear()
-        print_log("[OK] History dihapus", "ok")
-    else:
-        print_log("Dibatalkan", "warn")
-
-def cmd_reset_wallet(args):
-    confirm = input(f"{C.YELLOW}Yakin RESET saldo BTC? Tidak bisa dikembalikan! (yes/no): {C.RESET}")
-    if confirm.lower() == "yes":
-        btc_wallet.reset()
-        print_log("[OK] Wallet direset", "ok")
-    else:
-        print_log("Dibatalkan", "warn")
-
-def cmd_algo(args):
-    print_banner()
-    if args.set:
-        miner.algo = args.set.upper()
-        print_log(f"[OK] Algo diset: {miner.algo}", "ok")
-        return
-    print(f"  {C.CYAN}{C.BOLD}>> AVAILABLE ALGORITHMS (NiceHash){C.RESET}")
-    print(f"  {'─' * 70}")
-    algos = get_nh_algos()
-    if not algos:
-        print(f"  {C.RED}Gagal ambil data NiceHash API{C.RESET}")
-        items = CPU_ALGOS + GPU_ALGOS
-        for a in items:
-            print(f"    {a}")
-        return
-    items = sorted(algos.items(), key=lambda x: x[1]["paying"], reverse=True)
-    print(f"  {'#':<4}{'ALGORITHM':<28}{'PORT':<8}{'BTC/GH/DAY':<16}{'MODE':<8}")
-    print(f"  {'─' * 70}")
-    for i, (name, info) in enumerate(items, 1):
-        mode = "CPU" if name in [a.upper() for a in CPU_ALGOS] else "GPU"
-        print(f"  {i:<4}{name:<28}{info['port']:<8}{info['paying']:<16.8f}{mode:<8}")
-    print(f"\n  {C.YELLOW}Current: {miner.algo}{C.RESET}")
-
-def cmd_region(args):
-    print_banner()
-    if args.set:
-        r = args.set.lower()
-        if r in REGIONS:
-            miner.region = r
-            print_log(f"[OK] Region diset: {r.upper()} ({REGIONS[r]})", "ok")
+    banner()
+    price = get_prices()
+    print(f"Harga BTC: ${price.get('usd', 0):,.2f} | Rp {price.get('idr', 0):,.0f}\n")
+    if nh.configured():
+        data, err = nh.btc_balance()
+        if data:
+            av, tot = _num(data.get("available")), _num(data.get("totalBalance"))
+            print(f"{C.BOLD}SALDO ASLI NICEHASH{C.RESET}")
+            print(f"  Tersedia : {av:.8f} BTC (${av * price.get('usd', 0):,.2f})")
+            print(f"  Total    : {tot:.8f} BTC (${tot * price.get('usd', 0):,.2f})")
+            snapshot_balance()
         else:
-            print_log(f"[X] Region tidak valid. Pilih: {', '.join(REGIONS)}", "err")
+            log(f"Gagal ambil saldo: {err}", "err")
+        rigs, err = nh.rigs()
+        if rigs:
+            print(f"  Unpaid   : {rigs.get('unpaidAmount', '-')} BTC")
+            for r in (rigs.get("miningRigs") or [])[:10]:
+                print(f"  Rig      : {r.get('name', '?')} - {r.get('minerStatus', '?')}")
+    else:
+        print("Saldo asli belum aktif. Buat API key di nicehash.com (Settings > API Keys)")
+        print("dengan izin READ-ONLY (view wallet + view mining), lalu atur lewat env var")
+        print("NICEHASH_API_KEY / NICEHASH_API_SECRET / NICEHASH_ORG_ID atau perintah 'config'.")
+    t = history.totals()
+    print(f"\n{C.BOLD}ESTIMASI DARI RIWAYAT (bukan saldo){C.RESET}")
+    print(f"  Pendapatan est. : {t['est_btc']:.10f} BTC (${t['est_usd']:.4f})")
+    print(f"  Biaya listrik   : ${t['cost_usd']:.4f}   NET ${t['est_usd'] - t['cost_usd']:.4f}")
+    print(f"  Wallet tujuan   : {cfg['wallet']}")
+
+
+def cmd_profit(args):
+    banner()
+    algos, bench = get_algos(), load_json(BENCH_DB, {})
+    if not algos:
+        log("Gagal ambil data NiceHash", "err")
         return
-    print(f"  {C.CYAN}{C.BOLD}>> AVAILABLE REGIONS{C.RESET}")
-    for k, v in REGIONS.items():
-        cur = " < CURRENT" if k == miner.region else ""
-        print(f"    {k:<6} - {v}{C.YELLOW}{cur}{C.RESET}")
+    print(f"{C.BOLD}{'ALGO':<16}{'MODE':<6}{'HASHRATE':<14}{'WATT':<7}{'REV $/hari':<12}{'NET $/hari':<12}{C.RESET}")
+    rows = []
+    for algo, b in bench.items():
+        e = profit_estimate(algo, b["hashrate"], b["watts"])
+        if e:
+            rows.append((e["net_usd_day"], algo, b, e))
+    for net, algo, b, e in sorted(rows, reverse=True):
+        col = C.GREEN if net > 0 else C.RED
+        print(f"{algo:<16}{b['mode'].upper():<6}{fmt_hr(b['hashrate']):<14}{b['watts']:<7.0f}"
+              f"{e['rev_usd_day']:<12.4f}{col}{net:<12.4f}{C.RESET}")
+    if not rows:
+        print("Belum ada benchmark. Jalankan: benchmark --seconds 180")
+    print(f"\nListrik: ${cfg['electricity_usd_kwh']}/kWh. Net negatif = mining merugi.")
+
+
+def cmd_algos(args):
+    banner()
+    algos = get_algos()
+    if not algos:
+        log("Gagal ambil data NiceHash", "err")
+        return
+    print(f"{C.BOLD}{'ALGORITMA':<24}{'BTC/unit/hari':<18}{'UNIT':<6}{'DIDUKUNG':<10}{C.RESET}")
+    for name, a in sorted(algos.items(), key=lambda x: x[0]):
+        sup = "CPU" if name in CPU_ALGOS else "GPU" if name in GPU_ALGOS else "-"
+        print(f"{name:<24}{a['paying']:<18.10f}{a['unit']:<6}{sup:<10}")
+
+
+def cmd_benchmark(args):
+    banner()
+    algos = [a.upper() for a in args.algos] if args.algos else \
+        list(CPU_ALGOS) + (list(GPU_ALGOS) if has_gpu() else [])
+    for algo in algos:
+        log(f"Benchmark {algo} selama {args.seconds} detik...")
+        if not miner.start(algo, None):
+            continue
+        t0 = time.time()
+        try:
+            while time.time() - t0 < args.seconds and miner.is_running():
+                miner.tick()
+                time.sleep(3)
+            hr = stats.hr15m or stats.best_hr()
+            if hr > 0:
+                record_benchmark(algo, hr, current_watts(miner.mode), miner.mode, force=True)
+                log(f"{algo}: {fmt_hr(hr)}", "ok")
+            else:
+                log(f"{algo}: tidak ada hashrate", "warn")
+        except KeyboardInterrupt:
+            miner.stop()
+            return
+        miner.stop()
+        time.sleep(2)
+    cmd_profit(args)
+
 
 def cmd_gpu(args):
-    print_banner()
+    banner()
     gpus = detect_gpus()
-    print(f"  {C.CYAN}{C.BOLD}>> GPU DETECTION{C.RESET}")
-    print(f"  {'─' * 60}")
     if not gpus:
-        print(f"  {C.YELLOW}Tidak ada GPU dedicated terdeteksi.{C.RESET}")
-        print(f"  {C.WHITE}Gunakan algo CPU (RANDOMXMONERO) — XMRig akan mining pakai CPU.{C.RESET}")
+        print("Tidak ada GPU terdeteksi. Gunakan algoritma CPU (RANDOMXMONERO).")
         return
     for i, g in enumerate(gpus, 1):
-        status = f"{C.GREEN}KOMPATIBEL{C.RESET}" if g["compatible"] else f"{C.RED}TIDAK{C.RESET}"
-        print(f"  {i}. {C.WHITE}{g['name']}{C.RESET}")
-        print(f"     Vendor: {C.CYAN}{g['vendor']}{C.RESET} | "
-              f"VRAM: {C.CYAN}{g['vram']} MB{C.RESET} | Status: {status}")
+        st = f"{C.GREEN}kompatibel{C.RESET}" if g["compatible"] else f"{C.RED}tidak{C.RESET}"
+        print(f"{i}. {g['name']} | {g['vendor']} | VRAM {g['vram']} MB | {st}")
 
-def cmd_top(args):
-    print_banner()
-    print(f"  {C.CYAN}{C.BOLD}>> TOP ALGORITHMS (NiceHash){C.RESET}")
-    algos = get_nh_algos()
-    if not algos:
-        print(f"  {C.RED}Gagal ambil data NiceHash API{C.RESET}")
+
+def cmd_history(args):
+    banner()
+    t = history.totals()
+    print(f"Sesi {t['sessions']} | waktu {fmt_dur(t['time'])} | diterima {t['accepted']} | ditolak {t['rejected']}")
+    print(f"Estimasi pendapatan ${t['est_usd']:.4f} | listrik ${t['cost_usd']:.4f}\n")
+    print(f"{C.BOLD}{'ID':<17}{'DURASI':<10}{'ALGO':<16}{'ACC':<6}{'REJ':<6}{'EST BTC':<14}{C.RESET}")
+    for s in reversed(history.db["sessions"][-20:]):
+        print(f"{s.get('id', ''):<17}{fmt_dur(s.get('duration', 0)):<10}{s.get('algo', ''):<16}"
+              f"{s.get('accepted', 0):<6}{s.get('rejected', 0):<6}{s.get('est_btc', 0):<14.10f}")
+
+
+def cmd_export(args):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    fmt = args.format.lower()
+    if fmt not in ("csv", "json"):
+        log("Format harus csv atau json", "err")
         return
-    items = sorted(algos.items(), key=lambda x: x[1]["paying"], reverse=True)[:15]
-    print(f"  {'#':<4}{'ALGORITHM':<28}{'PORT':<8}{'BTC/GH/DAY':<16}{'EST BTC/DAY':<14}")
-    print(f"  {'─' * 70}")
-    for i, (name, info) in enumerate(items, 1):
-        est = detector.get_estimated_earnings(info["paying"])
-        est_str = f"{est:.8f}" if est > 0 else "-"
-        print(f"  {i:<4}{name:<28}{info['port']:<8}{info['paying']:<16.8f}{est_str:<14}")
+    path = BASE_DIR / f"pegasus_history_{ts}.{fmt}"
+    (history.export_csv if fmt == "csv" else history.export_json)(path)
+    log(f"Diekspor: {path}", "ok")
+
+
+def cmd_clear_history(args):
+    if input("Hapus SEMUA riwayat? (yes/no): ").strip().lower() == "yes":
+        history.clear()
+        log("Riwayat dihapus", "ok")
+
+
+def cmd_config(args):
+    if args.key and args.value is not None:
+        try:
+            cfg.set(args.key, args.value)
+            log(f"{args.key} diatur.", "ok")
+        except Exception as e:
+            log(str(e), "err")
+        return
+    banner()
+    for k in DEFAULTS:
+        v = cfg.data[k]
+        if k in SECRET_KEYS and v:
+            v = v[:4] + "****"
+        print(f"  {k:<22}= {v}")
+    print(f"\nUbah: config <kunci> <nilai>   File: {CONFIG_FILE}")
+
 
 def cmd_test(args):
-    print_log("[*] Test koneksi ke NiceHash...", "info")
-    algo = miner.algo.lower()
-    region = miner.region
-    try:
-        port = get_pool_port(miner.algo)
-    except:
-        port = 9200
-    host = f"{algo}.{region}.nicehash.com"
+    algo, region = cfg["algo"].lower(), cfg["region"]
+    host, port = f"{algo}.{region}.nicehash.com", int(cfg["port"])
     try:
         t0 = time.time()
-        s = socket.create_connection((host, port), timeout=8)
-        latency = int((time.time() - t0) * 1000)
-        s.close()
-        print_log(f"[OK] {host}:{port} OK — latency {latency}ms", "ok")
+        socket.create_connection((host, port), timeout=8).close()
+        log(f"{host}:{port} OK - latency {int((time.time() - t0) * 1000)} ms", "ok")
     except Exception as e:
-        print_log(f"[X] {host}:{port} -> {e}", "err")
+        log(f"{host}:{port} gagal: {e}", "err")
+
 
 def cmd_install(args):
-    print_log("[*] Download XMRig + lolMiner...", "info")
-    miner.ensure_xmrig(lambda m: print_log(m, "info"))
-    miner.ensure_lolminer(lambda m: print_log(m, "info"))
-    print_log("[OK] Selesai download binary", "ok")
+    ensure_binary("xmrig")
+    ensure_binary("lolminer")
 
-def cmd_info(args):
-    print_banner()
-    gpus = detect_gpus()
-    gtxt = gpus[0]["name"] if gpus else "Tidak ada GPU dedicated"
-    s = history.get_stats()
-    bal = btc_wallet.get_balance()
-    lvl = booster.get_current_level()
-    try:
-        port = get_pool_port(miner.algo)
-    except:
-        port = 9200
 
-    print(f"  {C.BOLD}{PEGASUS_BRAND} — NICEHASH MINER v19.0{C.RESET}")
-    print(f"  {C.CYAN}{PEGASUS_URL}{C.RESET}")
-    print(f"  {'─' * 60}")
-    print(f"  WALLET : {C.CYAN}{WALLET}{C.RESET}")
-    print(f"  WORKER : {C.CYAN}{WORKER}{C.RESET}")
-    print()
-    print(f"  Algo   : {C.YELLOW}{miner.algo}{C.RESET}")
-    print(f"  Region : {C.YELLOW}{miner.region.upper()}{C.RESET}")
-    print(f"  Pool   : {C.CYAN}{miner.algo.lower()}.{miner.region}.nicehash.com:{port}{C.RESET}")
-    print(f"  Mode   : {C.CYAN}{'CPU/XMRig' if miner.mode == 'cpu' else 'GPU/lolMiner'}{C.RESET}")
-    print(f"  GPU    : {C.CYAN}{gtxt}{C.RESET}")
-    print(f"  Status : {C.GREEN if miner.is_running() else C.RED}{'RUNNING' if miner.is_running() else 'OFFLINE'}{C.RESET}")
-    print(f"  Uptime : {C.YELLOW}{miner.uptime()}{C.RESET}")
-    print()
-    print(f"  {C.GOLD}>> BTC WALLET{C.RESET}")
-    print(f"    Balance        : {C.GOLD}{bal:.10f} BTC{C.RESET}")
-    print(f"    Total Earned   : {C.YELLOW}{btc_wallet.wallet['total_earned_btc']:.10f} BTC{C.RESET}")
-    print(f"    Total Shares   : {C.CYAN}{btc_wallet.wallet.get('total_shares', 0)}{C.RESET}")
-    print(f"    Total Sessions : {C.MAGENTA}{btc_wallet.wallet.get('sessions_count', 0)}{C.RESET}")
-    print(f"    Wallet DB      : {WALLET_DB}")
-    print()
-    print(f"  {C.MAGENTA}>> BOOSTER{C.RESET}")
-    print(f"    Level          : {lvl['color']}{lvl['name']}{C.RESET}")
-    print(f"    Multiplier     : {C.YELLOW}x{lvl['mult']:.2f}{C.RESET}")
-    print(f"    Active         : {btc_wallet.wallet.get('booster_active', True)}")
-    print()
-    print(f"  {C.CYAN}>> HISTORY{C.RESET}")
-    print(f"    Total Sessions : {s['total_sessions']}")
-    print(f"    Total Accepted : {s['total_accepted']}")
-    print(f"    Total Rejected : {s['total_rejected']}")
-    print()
-    print(f"  {C.GRAY}>> PATHS{C.RESET}")
-    print(f"    Base    : {BASE_DIR}")
-    print(f"    Miner   : {MINER_DIR}")
-    print(f"    Logs    : {LOGS_DIR}")
-    print(f"    History : {HISTORY_DB}")
-    print(f"    Wallet  : {WALLET_DB}")
-    print()
-    print(f"  {C.YELLOW}CARA CEK HASIL:{C.RESET}")
-    print(f"  1. Tunggu 5-10 menit setelah share pertama")
-    print(f"  2. Buka https://www.nicehash.com/my/miner")
-    print(f"  3. Login akun NiceHash Anda")
-    print(f"  4. Wallet: {WALLET[:20]}...")
+def cmd_tune(args):
+    banner()
+    print("""Cara NYATA menaikkan hashrate (bukan angka palsu):
+ CPU (RandomX)
+  - Aktifkan huge pages (Linux: sudo sysctl -w vm.nr_hugepages=1280; Windows: jalankan
+    sebagai Administrator agar XMRig bisa memakai large pages).
+  - Jalankan sebagai root/admin agar XMRig memasang MSR mod (naik 10-15% di banyak CPU).
+  - RAM dual-channel + XMP/EXPO; RandomX sangat bergantung pada cache L3 dan RAM.
+  - Hindari 100% thread jika PC dipakai kerja: config cpu_threads_pct 75.
+ GPU
+  - Undervolt + naikkan memory clock (MSI Afterburner / nvidia-smi -pl) untuk efisiensi.
+  - Pastikan suhu < 70C; kipas dan airflow menentukan stabilitas.
+ Profit
+  - Ukur watt dengan watt-meter lalu isi power_watts_cpu / power_watts_gpu.
+  - Isi electricity_usd_kwh sesuai tarif Anda, lalu jalankan: benchmark, profit, atau
+    aktifkan auto-switch (config autoswitch true).""")
+
 
 def cmd_menu(args):
-    """Interactive menu mode."""
+    items = [("1", "Start mining", lambda: cmd_start(argparse.Namespace(algo=None, region=None))),
+             ("2", "Stop mining", lambda: cmd_stop(None)),
+             ("3", "Dashboard real-time", lambda: cmd_dashboard(None)),
+             ("4", "Saldo & wallet", lambda: cmd_wallet(None)),
+             ("5", "Profit per algoritma", lambda: cmd_profit(None)),
+             ("6", "Benchmark", lambda: cmd_benchmark(argparse.Namespace(algos=None, seconds=180))),
+             ("7", "Riwayat", lambda: cmd_history(None)),
+             ("8", "Daftar algoritma NiceHash", lambda: cmd_algos(None)),
+             ("9", "GPU", lambda: cmd_gpu(None)),
+             ("10", "Config", lambda: cmd_config(argparse.Namespace(key=None, value=None))),
+             ("11", "Test koneksi pool", lambda: cmd_test(None)),
+             ("12", "Install binary", lambda: cmd_install(None)),
+             ("13", "Export CSV", lambda: cmd_export(argparse.Namespace(format="csv"))),
+             ("14", "Tips tuning", lambda: cmd_tune(None)),
+             ("0", "Keluar", None)]
     while True:
-        print_banner()
-        status_bar()
-        print(f"  {C.BOLD}MENU:{C.RESET}")
-        print(f"    {C.GREEN}[1]{C.RESET} Start Mining")
-        print(f"    {C.RED}[2]{C.RESET} Stop Mining")
-        print(f"    {C.CYAN}[3]{C.RESET} Status / Stats")
-        print(f"    {C.GOLD}[4]{C.RESET} BTC Wallet")
-        print(f"    {C.MAGENTA}[5]{C.RESET} Booster Levels")
-        print(f"    {C.MAGENTA}[6]{C.RESET} Mining History")
-        print(f"    {C.CYAN}[7]{C.RESET} Choose Algorithm")
-        print(f"    {C.CYAN}[8]{C.RESET} Choose Region")
-        print(f"    {C.CYAN}[9]{C.RESET} GPU Info")
-        print(f"    {C.CYAN}[10]{C.RESET} Top Algorithms")
-        print(f"    {C.CYAN}[11]{C.RESET} Test Connection")
-        print(f"    {C.CYAN}[12]{C.RESET} Install/Download Binaries")
-        print(f"    {C.CYAN}[13]{C.RESET} Export CSV")
-        print(f"    {C.CYAN}[14]{C.RESET} Export JSON")
-        print(f"    {C.CYAN}[15]{C.RESET} Info")
-        print(f"    {C.RED}[0]{C.RESET} Exit")
+        banner()
+        for k, name, _ in items:
+            print(f"  [{k}] {name}")
         try:
-            choice = input(f"\n  {C.YELLOW}Pilihan > {C.RESET}").strip()
+            ch = input("\nPilihan > ").strip()
         except (EOFError, KeyboardInterrupt):
             break
-        if choice == "1":
-            ok = miner.start(miner.algo, miner.region, lambda m: print_log(m, "info"))
-            if ok:
-                print_log("[OK] Mining berjalan! (Ctrl+C untuk stop)", "ok")
-                try:
-                    while miner.is_running():
-                        time.sleep(2)
-                        miner.parse_log()
-                        print(f"\r{C.GREEN}Hashrate: {detector.format_hashrate(detector.hashrate_60s)}"
-                              f" | Acc: {detector.accepted}"
-                              f" | Rej: {detector.rejected}"
-                              f" | BTC: {btc_wallet.get_balance():.10f}"
-                              f" | Up: {miner.uptime()}{C.RESET}   ", end="")
-                except KeyboardInterrupt:
-                    print()
-                    miner.stop()
-                    print_log("[OK] Stopped", "ok")
-            input(f"{C.GRAY}Enter untuk lanjut...{C.RESET}")
-        elif choice == "2":
-            cmd_stop(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "3":
-            miner.parse_log(); print_stats(); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "4":
-            cmd_wallet(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "5":
-            cmd_booster(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "6":
-            cmd_history(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "7":
-            cmd_algo(args)
-            a = input(f"{C.YELLOW}Set algo (kosongkan untuk batal) > {C.RESET}").strip()
-            if a: miner.algo = a.upper(); print_log(f"Algo: {miner.algo}", "ok")
-        elif choice == "8":
-            cmd_region(args)
-            r = input(f"{C.YELLOW}Set region (eu/usa/hk/jp/in/br) > {C.RESET}").strip().lower()
-            if r in REGIONS: miner.region = r; print_log(f"Region: {r}", "ok")
-        elif choice == "9":
-            cmd_gpu(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "10":
-            cmd_top(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "11":
-            cmd_test(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "12":
-            cmd_install(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "13":
-            cmd_export(argparse.Namespace(format="csv")); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "14":
-            cmd_export(argparse.Namespace(format="json")); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "15":
-            cmd_info(args); input(f"{C.GRAY}Enter...{C.RESET}")
-        elif choice == "0":
+        if ch == "0":
             break
+        fn = next((f for k, _, f in items if k == ch), None)
+        if fn:
+            fn()
+            try:
+                input("\nEnter untuk lanjut...")
+            except (EOFError, KeyboardInterrupt):
+                break
+
 
 # ══════════════════════════════════════════════════════════════════
-#  MAIN — ARGPARSE
+#  MAIN
 # ══════════════════════════════════════════════════════════════════
+def build_parser():
+    p = argparse.ArgumentParser(description=f"{BRAND} NiceHash Miner v{VERSION}")
+    p.add_argument("--no-color", action="store_true", help="matikan warna")
+    sub = p.add_subparsers(dest="command")
+    s = sub.add_parser("start", help="mulai mining + dashboard"); s.add_argument("-a", "--algo"); s.add_argument("-r", "--region")
+    sub.add_parser("stop", help="hentikan miner")
+    sub.add_parser("dashboard", help="dashboard real-time (attach)")
+    sub.add_parser("status", help="ringkasan sekali tampil")
+    sub.add_parser("wallet", help="saldo asli NiceHash + estimasi")
+    sub.add_parser("profit", help="profit per algoritma (dari benchmark)")
+    sub.add_parser("algos", help="daftar algoritma NiceHash live")
+    b = sub.add_parser("benchmark", help="ukur hashrate tiap algoritma")
+    b.add_argument("--algos", nargs="*"); b.add_argument("--seconds", type=int, default=180)
+    sub.add_parser("gpu", help="deteksi GPU")
+    sub.add_parser("history", help="riwayat sesi")
+    e = sub.add_parser("export", help="export riwayat"); e.add_argument("-f", "--format", default="csv")
+    sub.add_parser("clear-history", help="hapus riwayat")
+    c = sub.add_parser("config", help="lihat/ubah konfigurasi"); c.add_argument("key", nargs="?"); c.add_argument("value", nargs="?")
+    sub.add_parser("test", help="tes koneksi pool")
+    sub.add_parser("install", help="unduh XMRig & lolMiner")
+    sub.add_parser("tune", help="tips menaikkan hashrate")
+    sub.add_parser("menu", help="menu interaktif")
+    return p
+
+
 def main():
-    p = argparse.ArgumentParser(
-        description=f"{PEGASUS_BRAND} NiceHash Miner v19.0 — CLI Tools",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""
-Commands:
-  start       Start mining (live monitoring, Ctrl+C to stop)
-  stop        Stop mining
-  status      Show live status
-  wallet      Show BTC wallet (persistent balance)
-  booster     Show booster levels
-  history     Show mining history
-  algo        List/set algorithm
-  region      List/set region
-  gpu         Detect GPUs
-  top         Top algorithms
-  test        Test pool connection
-  install     Download miner binaries
-  export      Export history (csv/json)
-  info        Show full info
-  menu        Interactive menu
-  clear-history  Clear history
-  reset-wallet   Reset BTC wallet
-""")
-
-    p.add_argument("command", nargs="?", default="menu", help="Command to run")
-    p.add_argument("--algo", "-a", help="Algorithm")
-    p.add_argument("--region", "-r", help="Region")
-    p.add_argument("--set", "-s", help="Set value (for algo/region)")
-    p.add_argument("--format", "-f", default="csv", help="Export format (csv/json)")
-    p.add_argument("--toggle", "-t", action="store_true", help="Toggle booster")
-    p.add_argument("--no-color", action="store_true", help="Disable colors")
-
-    args = p.parse_args()
+    args = build_parser().parse_args()
     if args.no_color:
         C.disable()
-
-    cmds = {
-        "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
-        "wallet": cmd_wallet, "booster": cmd_booster, "history": cmd_history,
-        "algo": cmd_algo, "region": cmd_region, "gpu": cmd_gpu,
-        "top": cmd_top, "test": cmd_test, "install": cmd_install,
-        "export": cmd_export, "info": cmd_info, "menu": cmd_menu,
-        "clear-history": cmd_clear_history, "reset-wallet": cmd_reset_wallet,
-    }
-
-    if args.command in cmds:
-        try:
-            cmds[args.command](args)
-        except KeyboardInterrupt:
-            print()
-            print_log("[*] Interrupted — stopping miner...", "warn")
-            if miner.is_running():
-                miner.stop()
-            btc_wallet._save()
-            sys.exit(0)
-    else:
-        p.print_help()
-
-if __name__ == "__main__":
+    cmds = {"start": cmd_start, "stop": cmd_stop, "dashboard": cmd_dashboard, "status": cmd_status,
+            "wallet": cmd_wallet, "profit": cmd_profit, "algos": cmd_algos, "benchmark": cmd_benchmark,
+            "gpu": cmd_gpu, "history": cmd_history, "export": cmd_export, "clear-history": cmd_clear_history,
+            "config": cmd_config, "test": cmd_test, "install": cmd_install, "tune": cmd_tune,
+            "menu": cmd_menu}
     try:
-        main()
+        cmds[args.command or "menu"](args)
     except KeyboardInterrupt:
-        try:
+        print()
+        if miner.owned and miner.is_running():
             miner.stop()
-            btc_wallet._save()
-        except: pass
-        sys.exit(0)
     except Exception as e:
         print(f"Fatal: {e}")
         traceback.print_exc()
+        if miner.owned and miner.is_running():
+            miner.stop()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
